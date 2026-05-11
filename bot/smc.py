@@ -11,6 +11,13 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
 @dataclass
+class DealingRange:
+    top: float
+    bottom: float
+    equilibrium: float
+    trend: str  # 'uptrend' or 'downtrend'
+
+@dataclass
 class FVG:
     direction: str  # 'bullish' or 'bearish'
     top: float
@@ -91,13 +98,90 @@ def detect_fvgs(df: pd.DataFrame, lookback: int = 50) -> List[FVG]:
             if not future_df.empty and future_df['high'].max() >= fvg.top:
                 fvg.mitigated = True
 
-    return [f for f in fvgs if not fvg.mitigated]  # Return mostly unmitigated or recently unmitigated
+    return fvgs  # Return all FVGs, let the unmitigated function filter them
+
+
+def get_dealing_range(df: pd.DataFrame, lookback: int = 150) -> Optional[DealingRange]:
+    """Finds the recent Premium/Discount boundaries based on major swings."""
+    if len(df) < 5:
+        return None
+        
+    start_idx = max(2, len(df) - lookback)
+    
+    swing_highs = []
+    swing_lows = []
+    
+    for i in range(start_idx, len(df) - 2):
+        h = df['high'].iloc[i]
+        if (h > df['high'].iloc[i - 1] and h > df['high'].iloc[i - 2] and
+                h > df['high'].iloc[i + 1] and h > df['high'].iloc[i + 2]):
+            swing_highs.append((i, float(h)))
+
+        l = df['low'].iloc[i]
+        if (l < df['low'].iloc[i - 1] and l < df['low'].iloc[i - 2] and
+                l < df['low'].iloc[i + 1] and l < df['low'].iloc[i + 2]):
+            swing_lows.append((i, float(l)))
+            
+    if not swing_highs or not swing_lows:
+        return None
+        
+    last_high_idx, last_high_val = swing_highs[-1]
+    last_low_idx, last_low_val = swing_lows[-1]
+    
+    trend = 'uptrend' if last_high_idx > last_low_idx else 'downtrend'
+    
+    return DealingRange(
+        top=max(last_high_val, last_low_val),
+        bottom=min(last_high_val, last_low_val),
+        equilibrium=(last_high_val + last_low_val) / 2.0,
+        trend=trend
+    )
+
+def filter_pd_array_fvgs(fvgs: List[FVG], df: pd.DataFrame) -> List[FVG]:
+    """
+    Applies Premium & Discount Matrix rules:
+    - Only keeps Bullish FVGs if they are in the Discount zone (< 50%).
+    - Only keeps Bearish FVGs if they are in the Premium zone (> 50%).
+    """
+    dr = get_dealing_range(df)
+    if not dr:
+        return fvgs  # Fallback to no filter if no range
+
+    good_fvgs = []
+    for f in fvgs:
+        if f.direction == 'bullish':
+            # Must be inside discount
+            if f.top < dr.equilibrium:
+                good_fvgs.append(f)
+        else:
+            # Must be inside premium
+            if f.bottom > dr.equilibrium:
+                good_fvgs.append(f)
+    return good_fvgs
 
 
 def detect_unmitigated_fvgs(df: pd.DataFrame, lookback: int = 50) -> List[FVG]:
-    """Returns only FVGs that have not been fully filled yet."""
+    """Returns only high-probability FVGs inside the correct Premium/Discount zones that have not been filled."""
     fvgs = detect_fvgs(df, lookback=lookback)
-    return [f for f in fvgs if not f.mitigated]
+    unmitigated = [f for f in fvgs if not f.mitigated]
+    return filter_pd_array_fvgs(unmitigated, df)
+
+
+def filter_pd_array_obs(obs: List[OrderBlock], df: pd.DataFrame) -> List[OrderBlock]:
+    """Applies Premium & Discount Matrix rules to Order Blocks."""
+    dr = get_dealing_range(df)
+    if not dr:
+        return obs
+
+    good_obs = []
+    for ob in obs:
+        if ob.direction == 'bullish':
+            if ob.top < dr.equilibrium:
+                good_obs.append(ob)
+        else:
+            if ob.bottom > dr.equilibrium:
+                good_obs.append(ob)
+    return good_obs
 
 
 def detect_order_blocks(df: pd.DataFrame, lookback: int = 50) -> List[OrderBlock]:
@@ -154,7 +238,8 @@ def detect_order_blocks(df: pd.DataFrame, lookback: int = 50) -> List[OrderBlock
 
     # De-duplicate
     unique_obs = {ob.timestamp: ob for ob in obs}.values()
-    return list(sorted(unique_obs, key=lambda x: x.timestamp))
+    final_obs = list(sorted(unique_obs, key=lambda x: x.timestamp))
+    return filter_pd_array_obs(final_obs, df)
 
 
 def detect_liquidity_sweeps(df: pd.DataFrame, lookback: int = 30, min_wick_pct: float = 0.05) -> List[LiquiditySweep]:
