@@ -25,6 +25,7 @@ from bot.indicators import add_all_indicators, get_trend
 from bot.risk import calculate_risk_levels
 from bot.storage import SignalStorage, SignalRecord
 from bot.notifier import TelegramNotifier
+from trade_manager import manage_open_trades
 from bot.telegram_control import parse_telegram_control_command
 from bot.news_analyzer import NewsAnalyzer
 from bot.learning_engine import evaluate_learning_signal, compute_symbol_atr_calibration
@@ -2908,6 +2909,10 @@ def run_scan_loop(config: Config) -> None:
 
         scan_start = time.time()
         scan_count += 1
+        
+        # 1. Dynamic Trade Management (Break Even)
+        if mt5_client:
+            manage_open_trades(mt5_client)
         
         logger.info(f"=== Scan #{scan_count} at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')} ===")
 

@@ -64,6 +64,75 @@ def get_killzone_session(ts: pd.Timestamp) -> str:
     return 'None'
 
 
+@dataclass
+class DailyLiquidityLevels:
+    pdh: float  # Previous Day High
+    pdl: float  # Previous Day Low
+    timestamp: pd.Timestamp
+
+def get_volume_profile_poc(df: pd.DataFrame, lookback: int = 200, bins: int = 50) -> float:
+    """
+    Calculates the Point of Control (POC) using Volume Profile over a lookback period.
+    The POC is the price level with the highest traded volume.
+    """
+    if len(df) < lookback:
+        lookback = len(df)
+    if lookback < 50:
+        return 0.0
+        
+    recent_df = df.iloc[-lookback:]
+    min_price = recent_df['low'].min()
+    max_price = recent_df['high'].max()
+    
+    if min_price == max_price:
+        return min_price
+        
+    # Create price bins
+    price_bins = np.linspace(min_price, max_price, bins)
+    volume_profile = np.zeros(bins - 1)
+    
+    for i in range(len(recent_df)):
+        c = recent_df.iloc[i]
+        hl_range = c['high'] - c['low']
+        if hl_range == 0:
+            continue
+            
+        # Distribute volume proportionally across bins that overlap the candle's high/low
+        for b in range(bins - 1):
+            bin_low = price_bins[b]
+            bin_high = price_bins[b+1]
+            
+            # Check overlap
+            overlap_low = max(c['low'], bin_low)
+            overlap_high = min(c['high'], bin_high)
+            
+            if overlap_low < overlap_high:
+                weight = (overlap_high - overlap_low) / hl_range
+                volume_profile[b] += c['volume'] * weight
+                
+    max_vol_bin = np.argmax(volume_profile)
+    poc_price = (price_bins[max_vol_bin] + price_bins[max_vol_bin + 1]) / 2.0
+    return poc_price
+
+def get_previous_day_liquidity(df: pd.DataFrame) -> Optional[DailyLiquidityLevels]:
+    """Calculates the Previous Day High (PDH) and Previous Day Low (PDL) from a DataFrame."""
+    if len(df) < 100:
+        return None
+    try:
+        # Group by Date (UTC) to find daily highs and lows
+        daily_df = df.resample('D').agg({'high': 'max', 'low': 'min'})
+        if len(daily_df) < 2:
+            return None
+        # The row at index -2 is the previous completed day
+        prev_day = daily_df.iloc[-2]
+        return DailyLiquidityLevels(
+            pdh=float(prev_day['high']),
+            pdl=float(prev_day['low']),
+            timestamp=prev_day.name
+        )
+    except Exception:
+        return None
+
 def detect_fvgs(df: pd.DataFrame, lookback: int = 50) -> List[FVG]:
     """
     Detect Fair Value Gaps (Imbalances) in the recent price action.

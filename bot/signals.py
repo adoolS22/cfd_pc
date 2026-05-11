@@ -20,7 +20,8 @@ from .patterns import (
 from .smc import (
     detect_unmitigated_fvgs, detect_order_blocks, detect_liquidity_sweeps,
     get_nearest_unmitigated_fvg, get_nearest_order_block,
-    detect_structure_breaks, get_latest_structure_break, StructureBreak
+    detect_structure_breaks, get_latest_structure_break, StructureBreak,
+    get_previous_day_liquidity, get_volume_profile_poc
 )
 from .gann import calculate_gann_angles, analyze_square9, GannAnalysis, Square9Analysis
 from .time_cycles import analyze_52_cycle, analyze_lunar, CycleAnalysis, LunarAnalysis
@@ -1472,7 +1473,31 @@ def analyze_symbol(
     _smc_confluence = 0
     _smc_reasons = []
 
-    # 1. Order Blocks (OB)
+    # 1. Point of Control (POC - Volume Profile)
+    poc_price = get_volume_profile_poc(df_trend)
+    if poc_price > 0:
+        poc_dist = abs(current_price - poc_price) / current_price
+        if poc_dist < 0.005:  # Within 0.5% of POC
+            _smc_confluence += 1.5
+            _smc_reasons.append("✓ High Volume Node (POC) acts as magnet/support")
+
+    # 2. Previous Day Liquidity (PDH / PDL)
+    pd_liquidity = get_previous_day_liquidity(df_trend)
+    _pdl_swept = False
+    _pdh_swept = False
+    if pd_liquidity:
+        # Check if recent low pierced PDL
+        if potential_side == 'LONG' and df_entry['low'].min() <= pd_liquidity.pdl * 1.001:
+            _pdl_swept = True
+            _smc_confluence += 2
+            _smc_reasons.append("✓ Previous Day Low (PDL) Swept (Massive Liquidity)")
+        # Check if recent high pierced PDH
+        if potential_side == 'SHORT' and df_entry['high'].max() >= pd_liquidity.pdh * 0.999:
+            _pdh_swept = True
+            _smc_confluence += 2
+            _smc_reasons.append("✓ Previous Day High (PDH) Swept (Massive Liquidity)")
+
+    # 2. Order Blocks (OB)
     nearest_ob = get_nearest_order_block(obs, current_price, potential_side)
     _ob_near = False
     if nearest_ob:
