@@ -63,25 +63,6 @@ mt5_bridge:
 symbols:
 - BTC/USDT:USDT
 - ETH/USDT:USDT
-- LTC/USDT:USDT
-- BNB/USDT:USDT
-- XRP/USDT:USDT
-- ADA/USDT:USDT
-- DOT/USDT:USDT
-- ENJ/USDT:USDT
-- FIL/USDT:USDT
-- SNX/USDT:USDT
-- SOL/USDT:USDT
-- UNI/USDT:USDT
-- XTZ/USDT:USDT
-- AAVE/USDT:USDT
-- COMP/USDT:USDT
-- DOGE/USDT:USDT
-- HBAR/USDT:USDT
-- LINK/USDT:USDT
-- MANA/USDT:USDT
-- MATIC/USDT:USDT
-- THETA/USDT:USDT
 - EURUSD
 - GBPUSD
 - USDJPY
@@ -177,21 +158,21 @@ learning:
   retrain_interval_minutes: 10
   min_closed_trades: 40
   min_symbol_side_trades: 5
-  min_expected_winrate: 40.0
-  min_expected_pnl_pct: -99.0
-  hard_block_winrate: 20.0
-  score_bonus_max: 20.0
-  score_penalty_max: 20.0
+  min_expected_winrate: 0.50
+  min_expected_pnl_pct: 0.0
+  hard_block_winrate: 0.45
+  score_bonus_max: 1.0
+  score_penalty_max: 1.5
   block_on_low_quality: true
   decision_mode: hybrid
-  decision_min_samples: 5
-  decision_min_winrate: 35.0
-  decision_min_pnl_pct: -99.0
-  decision_min_expectancy_pct: -99.0
-  decision_min_edge_pct: -99.0
-  optimize_for_expectancy: false
-  expectancy_weight: 0.0
-  hybrid_min_expectancy_pct: -0.5
+  decision_min_samples: 20
+  decision_min_winrate: 0.52
+  decision_min_pnl_pct: 0.0
+  decision_min_expectancy_pct: 0.0
+  decision_min_edge_pct: 0.005
+  optimize_for_expectancy: true
+  expectancy_weight: 1.5
+  hybrid_min_expectancy_pct: 0.0
   exclude_seeded_outcomes: true
   include_only_real_outcomes: true
   seeded_weight: 0.0
@@ -291,12 +272,9 @@ quality_filter:
 order_flow:
   enabled: false
 onchain:
-  enabled: true
+  enabled: false
 llm_postmortem:
-  enabled: true
-  startup_max_reviews: 1000
-  only_losses: false
-  lookback_days: 90
+  enabled: false
 ml_engine:
   enabled: true
   min_win_probability_boost: 0.55
@@ -367,9 +345,8 @@ time_analysis:
 telegram:
   enabled: true
 openai:
-  enabled: true
-  model: qwen2.5:7b
-  base_url: http://localhost:11434/v1
+  enabled: false
+  model: gpt-4o-mini
 ollama:
   enabled: true
   model: qwen2.5:7b

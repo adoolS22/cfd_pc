@@ -25,7 +25,6 @@ from bot.indicators import add_all_indicators, get_trend
 from bot.risk import calculate_risk_levels
 from bot.storage import SignalStorage, SignalRecord
 from bot.notifier import TelegramNotifier
-from trade_manager import manage_open_trades
 from bot.telegram_control import parse_telegram_control_command
 from bot.news_analyzer import NewsAnalyzer
 from bot.learning_engine import evaluate_learning_signal, compute_symbol_atr_calibration
@@ -430,21 +429,15 @@ def _run_llm_postmortem_backfill_worker(db_path: str, config: Config) -> None:
                 f"LLM postmortem backfill: evaluating {len(pending)} historical outcomes "
                 f"(lookback={lookback_days}d, limit={startup_limit})"
             )
-            import concurrent.futures
-            # Extract valid OIDs first
-            oids = []
             for row in pending:
                 try:
                     oid = int(row.get("id") or 0)
-                    if oid > 0:
-                        oids.append(oid)
                 except Exception:
+                    oid = 0
+                if oid <= 0:
                     continue
-            
-            # Run in parallel using 3 workers for fast GPU consumption
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                futures = [executor.submit(_run_llm_postmortem_worker, db_path, oid, config) for oid in oids]
-                concurrent.futures.wait(futures)
+                _run_llm_postmortem_worker(db_path=db_path, outcome_id=oid, config=config)
+                time.sleep(0.2)
 
         # Enrich old reviews as tagging logic evolves (no extra LLM/API calls).
         enrich_limit = max(120, startup_limit * 3)
@@ -1406,7 +1399,7 @@ def interruptible_sleep(seconds: float, step: float = 1.0) -> None:
     """Sleep in small steps so pause/stop commands are applied quickly."""
     end_at = time.time() + max(0.0, seconds)
     while time.time() < end_at and not shutdown_requested and not is_scan_paused():
-        time.sleep(max(0.0, min(step, end_at - time.time())))
+        time.sleep(min(step, end_at - time.time()))
 
 
 def check_open_outcomes(
@@ -1914,47 +1907,7 @@ def scan_symbol(
         mode_label = "🔸 FUTURES"
         
         logger.info(f"Scanning {symbol} [{signal_mode.upper()}]...")
-
-        # Block ALL symbols on weekends — on Exness all CFDs (including crypto) follow forex hours
-        _now_utc = datetime.now(timezone.utc)
-        _weekday = _now_utc.weekday()  # 0=Mon ... 5=Sat, 6=Sun
-        # Forex/CFD market: opens Sunday 21:00 UTC, closes Friday 21:00 UTC
-        _is_weekend = (
-            _weekday == 5  # Saturday all day
-            or (_weekday == 6 and _now_utc.hour < 21)  # Sunday before 21:00 UTC
-            or (_weekday == 4 and _now_utc.hour >= 21)  # Friday after 21:00 UTC
-        )
-        if _is_weekend:
-            logger.info(f"Market closed (weekend) — skipping {symbol}")
-            return ''
-
-        # Block macro/forex signals during off-hours (thin liquidity / closed sessions)
-        if _is_macro_session_symbol(symbol):
-            _sym_up = str(symbol).upper()
-            _h = _now_utc.hour
-            _is_comex = any(k in _sym_up for k in ("XAU", "XAG", "GOLD", "SILVER"))
-            _is_oil   = any(k in _sym_up for k in ("OIL", "WTI", "BRENT", "USOIL"))
-            _is_index = any(k in _sym_up for k in ("US500", "SP500", "SPX", "NAS", "DOW"))
-            _is_forex = not (_is_comex or _is_oil or _is_index)
-
-            _market_closed_reason = None
-            if _is_comex and _h == 21:
-                # Comex daily break 21:00-22:00 UTC
-                _market_closed_reason = "Comex daily break (21:00-22:00 UTC)"
-            elif _is_oil and _h == 22:
-                # Oil daily break 22:00-23:00 UTC
-                _market_closed_reason = "Oil market daily break (22:00-23:00 UTC)"
-            elif _is_index and (_h < 13 or _h >= 21):
-                # US indices: NYSE open 13:30-20:00 UTC, signals only 13:00-21:00
-                _market_closed_reason = f"US index market closed (outside 13:00-21:00 UTC)"
-            elif _is_forex and _h == 21:
-                # Forex daily rollover 21:00-22:00 UTC (very thin liquidity)
-                _market_closed_reason = "Forex daily rollover (21:00-22:00 UTC)"
-
-            if _market_closed_reason:
-                logger.info(f"Market closed ({_market_closed_reason}) — skipping {symbol}")
-                return ''
-
+        
         # Fetch OHLCV data for all timeframes based on mode
         timeframes = {
             'trend': mode_config.trend_tf,
@@ -1993,16 +1946,7 @@ def scan_symbol(
             else:
                 # Fetch current ticker from selected exchange (Binance / mt5_bridge / etc.)
                 ticker = fetch_ticker(exchange, symbol)
-
-            # MT5: check trade_mode — skip symbol if market not open for new orders
-            # trade_mode: 0=disabled, 3=close-only, 4=full (1=long-only, 2=short-only also ok)
-            if ticker and str(getattr(exchange, "id", "") or "").lower() in ("mt5", "mt5_bridge"):
-                _sym_trade_mode = int((ticker.get("symbol_info") or {}).get("trade_mode", 4))
-                if _sym_trade_mode not in (1, 2, 4):  # not FULL / LONGONLY / SHORTONLY
-                    _tm_label = {0: "disabled", 3: "close-only"}.get(_sym_trade_mode, str(_sym_trade_mode))
-                    logger.info(f"Market not open for {symbol} (trade_mode={_tm_label}) — skipping")
-                    return ''
-
+            
         # Order flow data
         order_flow_data = None
         of_cfg = getattr(config, 'order_flow', None)
@@ -2601,15 +2545,17 @@ def scan_symbol(
 
             # Send signal
             try:
+                import os
+                import tempfile
                 from bot.chart_generator import generate_signal_chart
-                chart_path = f"/tmp/{symbol.replace('/', '_').replace(':', '_')}_chart.png"
+                temp_dir = tempfile.gettempdir()
+                chart_path = os.path.join(temp_dir, f"{symbol.replace('/', '_').replace(':', '_')}_chart.png")
                 generated = generate_signal_chart(symbol, data['entry'], result, chart_path)
-                if generated and notifier.enabled:
-                    notifier._send_telegram_photo(generated, caption=f"📊 شارت لـ {symbol}")
             except Exception as chart_err:
                 logger.error(f"Chart hook failed: {chart_err}")
+                generated = None
 
-            notifier.send_signal(result)
+            notifier.send_signal(result, chart_path=generated)
             
             # --- START AUTO-TRADING HOOK ---
             if auto_trade_cfg.get("enabled", False) and exchange.id in ("mt5", "metatrader5"):
@@ -2648,19 +2594,7 @@ def scan_symbol(
                         lot1 = base_lot
                         lot2 = 0.0
                         
-                    # --- SPREAD PROTECTION ---
-                    ask = sym_info.get("symbol_info", {}).get("ask", 0.0) if sym_info else 0.0
-                    bid = sym_info.get("symbol_info", {}).get("bid", 0.0) if sym_info else 0.0
-                    max_spread_pct = float(auto_trade_cfg.get("max_spread_pct", 0.30))  # Default 0.30%
-                    spread_pct = ((ask - bid) / bid) * 100 if bid > 0 and ask > bid else 0.0
-                    
-                    if spread_pct > max_spread_pct:
-                        logger.warning(f"Spread too high for {symbol}: {spread_pct:.3f}% > {max_spread_pct}%. Aborting auto-trade.")
-                        if notifier.enabled:
-                            notifier.send_text(f"🛑 <b>Trade Aborted (Spread):</b> {symbol}\nSpread: {spread_pct:.3f}% (Max: {max_spread_pct}%)")
-                        return '' # Abort this trade execution
-
-                    logger.info(f"Auto-trading execution triggered for {symbol} ({result.side}) with lot={base_lot} (split: {lot1} TP1, {lot2} TP2) | Spread: {spread_pct:.3f}%")
+                    logger.info(f"Auto-trading execution triggered for {symbol} ({result.side}) with lot={base_lot} (split: {lot1} TP1, {lot2} TP2)")
                     
                     # Execute T1 (75% or 100%)
                     trade_res = client.execute_trade(
@@ -2909,10 +2843,6 @@ def run_scan_loop(config: Config) -> None:
 
         scan_start = time.time()
         scan_count += 1
-        
-        # 1. Dynamic Trade Management (Break Even)
-        if mt5_client:
-            manage_open_trades(mt5_client)
         
         logger.info(f"=== Scan #{scan_count} at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')} ===")
 
