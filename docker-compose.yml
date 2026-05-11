@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  crypto-signal-bot:
+    build: .
+    container_name: crypto-signal-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./signals.db:/app/signals.db
+      - ./signal_bot.log:/app/signal_bot.log
+      - ./fomc_cache.json:/app/fomc_cache.json

@@ -1,0 +1,35 @@
+# Core Trading Libraries
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Exchange API
+ccxt>=4.1.0
+MetaTrader5>=5.0.45
+yfinance>=0.2.36
+
+# HTTP Requests
+requests>=2.31.0
+openai>=1.30.0
+
+# Configuration
+pyyaml>=6.0.0
+python-dotenv>=1.0.0
+
+# Astronomy (for lunar cycles)
+ephem>=4.1.0
+
+# Logging
+loguru>=0.7.0
+
+# Data Validation
+pydantic>=2.5.0
+
+# HTML Parsing (for FOMC dates)
+beautifulsoup4>=4.12.0
+
+# Testing
+pytest>=7.4.0
+pytest-mock>=3.12.0
+
+# Machine Learning
+scikit-learn>=1.3.0

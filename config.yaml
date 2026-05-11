@@ -1,0 +1,384 @@
+exchange_name: mt5
+market_type: futures
+mt5:
+  login: 262830567
+  password: Adel635306200-
+  server: Exness-MT5Trial16
+  path: ''
+  timeout_seconds: 10
+  strict_mode: true
+  fallback_exchange: ''
+  auto_trade:
+    enabled: true
+    fixed_lot: 0.01  # Will be raised to symbol vol_min if higher
+    max_spread_pct: 0.0
+    max_spread: 0.0
+  default_symbol: XAUUSD
+  symbol_suffix: ''
+  symbol_map:
+    BTCUSDT: BTCUSDm
+    ETHUSDT: ETHUSDm
+    LTCUSDT: LTCUSDm
+    BNBUSDT: BNBUSDm
+    XRPUSDT: XRPUSDm
+    ADAUSDT: ADAUSDm
+    DOTUSDT: DOTUSDm
+    ENJUSDT: ENJUSDm
+    FILUSDT: FILUSDm
+    SNXUSDT: SNXUSDm
+    SOLUSDT: SOLUSDm
+    UNIUSDT: UNIUSDm
+    XTZUSDT: XTZUSDm
+    AAVEUSDT: AAVEUSDm
+    COMPUSDT: COMPUSDm
+    DOGEUSDT: DOGEUSDm
+    HBARUSDT: HBARUSDm
+    LINKUSDT: LINKUSDm
+    MANAUSDT: MANAUSDm
+    MATICUSDT: MATICUSDm
+    THETAUSDT: THETAUSDm
+    EURUSD: EURUSDm
+    GBPUSD: GBPUSDm
+    USDJPY: USDJPYm
+    USDCHF: USDCHFm
+    AUDUSD: AUDUSDm
+    USDCAD: USDCADm
+    NZDUSD: NZDUSDm
+    XAUUSD: XAUUSDm
+    XAGUSD: XAGUSDm
+    USOIL: USOILm
+    WTIUSD: USOILm
+    OILUSD: USOILm
+    US500: US500m
+    SPX500: US500m
+    SNP500: US500m
+mt5_bridge:
+  base_url: http://127.0.0.1:18080
+  token_env: MT5_BRIDGE_TOKEN
+  timeout_seconds: 6
+  verify_ssl: false
+  strict_mode: true
+  fallback_exchange: binance
+  symbol_suffix: ''
+symbols:
+- BTC/USDT:USDT
+- ETH/USDT:USDT
+- LTC/USDT:USDT
+- BNB/USDT:USDT
+- XRP/USDT:USDT
+- ADA/USDT:USDT
+- DOT/USDT:USDT
+- ENJ/USDT:USDT
+- FIL/USDT:USDT
+- SNX/USDT:USDT
+- SOL/USDT:USDT
+- UNI/USDT:USDT
+- XTZ/USDT:USDT
+- AAVE/USDT:USDT
+- COMP/USDT:USDT
+- DOGE/USDT:USDT
+- HBAR/USDT:USDT
+- LINK/USDT:USDT
+- MANA/USDT:USDT
+- MATIC/USDT:USDT
+- THETA/USDT:USDT
+- EURUSD
+- GBPUSD
+- USDJPY
+- USDCHF
+- AUDUSD
+- USDCAD
+- NZDUSD
+- XAU/USD
+- XAGUSD
+- USOIL
+- US500
+futures:
+  enabled: true
+  trend_tf: 15m
+  entry_tf: 1m
+  sr_tf: 5m
+  htf: 1h
+futures_macro:
+  enabled: true
+  trend_tf: 15m
+  entry_tf: 1m
+  sr_tf: 5m
+  htf: 1h
+limit: 300
+scan_interval_seconds: 45
+cooldown_minutes: 12
+risk:
+  buffer_pct: 0.35
+  rr_tp1: 0.5
+  rr_tp2: 3.0
+  quick_tp_pct: 0.5
+  quick_tp_min_pct: 0.25
+  min_rr_tp1: 0.0
+  max_sl_pct_crypto: 5.0
+  max_sl_pct_macro: 5.0
+  quick_tp1_fraction: 0.5
+  quick_tp_outcome_enabled: true
+  break_even_after_tp1: true
+  break_even_buffer_pct: 0.05
+  trailing_after_tp1: true
+  trailing_rr_from_risk: 0.5
+  trailing_min_move_pct: 0.1
+  atr_stop_mult: 3.5
+  atr_buffer_mult: 0.45
+  tp2_atr_mult: 4.0
+  timeframe_quick_tp_scale:
+    1m: 0.7
+    3m: 0.8
+    5m: 0.9
+    15m: 1.0
+    1h: 1.15
+    4h: 1.3
+  timeframe_tp2_rr_scale:
+    1m: 0.9
+    3m: 0.95
+    5m: 1.0
+    15m: 1.1
+    1h: 1.25
+    4h: 1.4
+partial_exit:
+  enabled: true
+  tp1_exit_pct: 0.75
+  remainder_pct: 0.25
+  min_rr_to_enable: 0.1
+regime:
+  enabled: true
+  adx_trend_min: 22.0
+  ema200_slope_abs_min: 0.0015
+  high_vol_atr_pct: 1.2
+  sideways_threshold_add: 1
+  high_vol_threshold_add: 1
+  aligned_score_bonus: 0.6
+  countertrend_score_penalty: 0.0
+  quick_tp_scale_sideways: 0.8
+  quick_tp_scale_high_vol: 0.75
+scoring:
+  base_threshold: 4
+  base_threshold_crypto: -5.0
+  base_threshold_macro: -5.0
+  add_timing_to_score: true
+  max_timing_points_used: 4
+  dynamic_threshold_enabled: false
+  dynamic_low_vol_atr_pct: 0.45
+  dynamic_high_vol_atr_pct: 1.25
+  dynamic_low_vol_adjust: -0.5
+  dynamic_high_vol_adjust: 0.8
+  dynamic_strong_trend_adx_min: 28.0
+  dynamic_strong_trend_adjust: -0.5
+  min_threshold: 2.0
+learning:
+  enabled: true
+  lookback_days: 30
+  retrain_interval_minutes: 10
+  min_closed_trades: 40
+  min_symbol_side_trades: 5
+  min_expected_winrate: 40.0
+  min_expected_pnl_pct: -99.0
+  hard_block_winrate: 20.0
+  score_bonus_max: 20.0
+  score_penalty_max: 20.0
+  block_on_low_quality: true
+  decision_mode: hybrid
+  decision_min_samples: 5
+  decision_min_winrate: 35.0
+  decision_min_pnl_pct: -99.0
+  decision_min_expectancy_pct: -99.0
+  decision_min_edge_pct: -99.0
+  optimize_for_expectancy: false
+  expectancy_weight: 0.0
+  hybrid_min_expectancy_pct: -0.5
+  exclude_seeded_outcomes: true
+  include_only_real_outcomes: true
+  seeded_weight: 0.0
+  recency_half_life_days: 7
+  estimated_roundtrip_cost_pct_crypto: 0.08
+  estimated_roundtrip_cost_pct_macro: 0.03
+  use_regime_profile: true
+  regime_blend_strength: 0.4
+  regime_min_samples: 6
+  hard_block_requires_full_local_samples: false
+btc_pulse:
+  enabled: false
+  symbol: BTC/USDT:USDT
+  trend_tf: 15m
+  block_altcoin_long_on_down: true
+  block_altcoin_short_on_up: false
+crypto_session:
+  enabled: true
+  mode: cautious
+  threshold_add: 0.0
+  blocked_utc_windows:
+  - 02:00-04:00
+  - 14:00-15:00
+  - 16:00-17:00
+  - 18:00-19:00
+  cautious_windows:
+  - 06:00-08:00
+quality_filter:
+  enabled: false
+  max_spread_pct: 100.0
+  min_volume_ratio: 0.35
+  min_volume_ratio_macro: 0.0
+  require_learning_alignment: false
+  learning_min_samples: 10
+  max_negative_learning_adjustment: -0.4
+  block_during_high_impact_news: true
+  high_impact_news_mode: cautious
+  high_impact_threshold_add: 0.0
+  block_on_opposing_news: false
+  opposing_news_score: 0.9
+  opposing_news_score_macro: 1.6
+  relaxed_volume_mode: true
+  min_volume_ratio_relaxed: 0.28
+  volume_relax_adx_min: 24.0
+  volume_relax_max_spread_pct: 0.16
+  volume_relax_min_score_margin: -0.2
+  anti_chasing_atr_mult: 2.5
+  anti_chasing_lookback_bars: 3
+  htf_context_enabled: true
+  htf_structure_lookback: 60
+  htf_raid_lookback: 40
+  htf_poi_max_distance_pct: 0.35
+  htf_structure_bonus: 1.0
+  htf_structure_penalty: 1.3
+  htf_poi_bonus: 1.2
+  htf_poi_penalty: 1.2
+  htf_raid_bonus: 0.8
+  htf_raid_penalty: 0.6
+  ltf_confirmation_min_signals: 1
+  ltf_confirmation_bonus: 0.8
+  ltf_no_confirmation_penalty: 1.0
+  macro_session_filter_enabled: true
+  macro_session_mode: cautious
+  macro_session_threshold_add: 0.15
+  # Active trading windows (UTC):
+  #   Asian session:  00:00-08:00  (JPY, AUD, NZD pairs)
+  #   London session: 07:00-16:00  (EUR, GBP, CHF, Gold, Oil)
+  #   New York session: 12:00-21:00 (USD pairs, US500, Oil)
+  macro_session_utc_windows:
+  - 00:00-08:00
+  - 07:00-16:00
+  - 12:00-21:00
+  llm_adapter_enabled: true
+  llm_adapter_shadow_mode: false
+  llm_adapter_lookback_days: 21
+  llm_adapter_min_reviews: 3
+  llm_adapter_min_confidence: 60
+  llm_adapter_late_entry_ratio: 0.45
+  llm_adapter_stop_tight_ratio: 0.45
+  llm_adapter_news_ratio: 0.35
+  llm_adapter_regime_ratio: 0.35
+  llm_adapter_onchain_against_ratio: 0.35
+  llm_adapter_onchain_low_reliability_ratio: 0.45
+  llm_adapter_threshold_add_late: 0.35
+  llm_adapter_threshold_add_stop: 0.35
+  llm_adapter_threshold_add_news: 0.5
+  llm_adapter_threshold_add_regime: 0.25
+  llm_adapter_threshold_add_onchain_against: 0.3
+  llm_adapter_threshold_add_onchain_reliability: 0.2
+  llm_adapter_onchain_min_reliability: 0.45
+  llm_adapter_onchain_max_age_minutes: 360
+  altcoin_correlation_filter_enabled: false
+  max_correlated_altcoin_same_dir: 2
+  correlation_window_minutes: 30
+  min_score_margin: -10.0
+  volume_ratio_threshold: 0.0
+order_flow:
+  enabled: false
+onchain:
+  enabled: true
+llm_postmortem:
+  enabled: true
+  startup_max_reviews: 1000
+  only_losses: false
+  lookback_days: 90
+ml_engine:
+  enabled: true
+  min_win_probability_boost: 0.55
+  max_win_probability_penalty: 0.45
+  ml_score_boost: 1.5
+  ml_threshold_penalty: 1.5
+  block_during_high_impact_news: true
+  high_impact_news_mode: cautious
+  high_impact_threshold_add: 0.2
+  block_on_opposing_news: false
+  opposing_news_score: 0.9
+  opposing_news_score_macro: 1.6
+  require_learning_alignment: true
+  learning_min_samples: 10
+  max_negative_learning_adjustment: -0.4
+  altcoin_correlation_filter_enabled: true
+  max_correlated_altcoin_same_dir: 2
+  correlation_window_minutes: 30
+portfolio_risk:
+  enabled: false
+  daily_loss_limit_pct: -3.0
+  max_open_positions: 3
+  max_consecutive_losses: 4
+  loss_streak_cooldown_minutes: 90
+quality_first:
+  enabled: false
+schools:
+  enabled: true
+  advisory_only: true
+time_analysis:
+  enabled: true
+  gann_angles: false
+  square9: false
+  fibonacci: true
+  cycle_52: true
+  lunar: false
+  fomc_filter: true
+  cpi_filter: true
+  nfp_filter: true
+  powell_filter: true
+  fomc_minutes_filter: true
+  sentiment_filter: true
+  social_sentiment_filter: false
+  lunar_window_hours: 24
+  fomc_high_vol_days: 2
+  cpi_high_vol_days: 1
+  nfp_high_vol_days: 1
+  powell_high_vol_hours: 24
+  fomc_minutes_high_vol_days: 0
+  sentiment_extreme_fear: 25
+  sentiment_extreme_greed: 75
+  social_sentiment_min_posts: 20
+  social_sentiment_caution_ratio: 0.52
+  social_sentiment_extreme_ratio: 0.6
+  zone_proximity_pct: 0.15
+  expert_advisor: false
+  expert_advisor_timeout_seconds: 75
+  manager_advisor: false
+  manager_advisor_timeout_seconds: 75
+  expert_use_as_filter: false
+  expert_min_confidence: 55
+  expert_block_on_wait: false
+  expert_require_side_alignment: false
+  exit_min_hold_minutes: 8
+  exit_min_pattern_strength: 3
+  exit_reverse_confirmation_bars: 2
+  manager_use_as_filter: false
+telegram:
+  enabled: true
+openai:
+  enabled: true
+  model: qwen2.5:7b
+  base_url: http://localhost:11434/v1
+ollama:
+  enabled: true
+  model: qwen2.5:7b
+  base_url: http://localhost:11434
+logging:
+  level: INFO
+  file: signal_bot.log
+expert_advisor:
+  enabled: false
+trade_filters:
+  max_spread_pct: 0.05
+  include_spread_in_risk: true

@@ -1,0 +1,509 @@
+# Crypto Signal Bot Configuration
+# ================================
+
+exchange_name: mt5
+market_type: futures
+
+# Direct MetaTrader 5 connection using the official Python package.
+# You can set login/password/server here or via MT5_LOGIN / MT5_PASSWORD / MT5_SERVER env vars.
+mt5:
+  login: 260705594
+  password: Pf8m_mc.#Xzh8iW
+  server: Exness-MT5Trial15
+  path: ""                    # optional terminal64.exe path if MT5 is not auto-detected
+  timeout_seconds: 10
+  strict_mode: true           # stop bot if MT5 is unavailable (avoid non-MT5 fallback prices)
+  fallback_exchange: ""       # keep empty for MT5-only mode
+  auto_trade:
+    enabled: true             # Enable live real-money execution
+    fixed_lot: 0.01           # The fixed lot size for every trade
+    max_spread_pct: 0.50      # Reject trades if Ask/Bid spread > 0.50%
+  default_symbol: "XAUUSD"
+  symbol_suffix: ""           # broker symbols were detected explicitly via symbol_map below
+  symbol_map:
+    "BTCUSDT": "BTCUSDm"
+    "ETHUSDT": "ETHUSDm"
+    "LTCUSDT": "LTCUSDm"
+    "BNBUSDT": "BNBUSDm"
+    "XRPUSDT": "XRPUSDm"
+    "ADAUSDT": "ADAUSDm"
+    "DOTUSDT": "DOTUSDm"
+    "ENJUSDT": "ENJUSDm"
+    "FILUSDT": "FILUSDm"
+    "SNXUSDT": "SNXUSDm"
+    "SOLUSDT": "SOLUSDm"
+    "UNIUSDT": "UNIUSDm"
+    "XTZUSDT": "XTZUSDm"
+    "AAVEUSDT": "AAVEUSDm"
+    "COMPUSDT": "COMPUSDm"
+    "DOGEUSDT": "DOGEUSDm"
+    "HBARUSDT": "HBARUSDm"
+    "LINKUSDT": "LINKUSDm"
+    "MANAUSDT": "MANAUSDm"
+    "MATICUSDT": "MATICUSDm"
+    "THETAUSDT": "THETAUSDm"
+    "EURUSD": "EURUSDm"
+    "GBPUSD": "GBPUSDm"
+    "USDJPY": "USDJPYm"
+    "USDCHF": "USDCHFm"
+    "AUDUSD": "AUDUSDm"
+    "USDCAD": "USDCADm"
+    "NZDUSD": "NZDUSDm"
+    "XAUUSD": "XAUUSDm"
+    "XAGUSD": "XAGUSDm"
+    "USOIL": "USOILm"
+    "WTIUSD": "USOILm"
+    "OILUSD": "USOILm"
+    "US500": "US500m"
+    "SPX500": "US500m"
+    "SNP500": "US500m"
+
+# Legacy HTTP bridge configuration remains unused while exchange_name is mt5.
+mt5_bridge:
+  base_url: "http://127.0.0.1:18080"
+  token_env: "MT5_BRIDGE_TOKEN"
+  timeout_seconds: 6
+  verify_ssl: false
+  strict_mode: true
+  fallback_exchange: binance
+  symbol_suffix: ""
+
+symbols:
+  # Aligned to mt5.symbol_map
+  - "BTC/USDT:USDT"
+  - "ETH/USDT:USDT"
+  - "LTC/USDT:USDT"
+  - "XRP/USDT:USDT"
+  - "ADA/USDT:USDT"
+  - "BNB/USDT:USDT"
+  - "DOT/USDT:USDT"
+  - "ENJ/USDT:USDT"
+  - "FIL/USDT:USDT"
+  - "SNX/USDT:USDT"
+  - "SOL/USDT:USDT"
+  - "UNI/USDT:USDT"
+  - "XTZ/USDT:USDT"
+  - "AAVE/USDT:USDT"
+  - "COMP/USDT:USDT"
+  - "DOGE/USDT:USDT"
+  - "HBAR/USDT:USDT"
+  - "LINK/USDT:USDT"
+  - "MANA/USDT:USDT"
+  - "MATIC/USDT:USDT"
+  - "THETA/USDT:USDT"
+  - "EURUSD"
+  - "GBPUSD"
+  - "USDJPY"
+  - "USDCHF"
+  - "AUDUSD"
+  - "USDCAD"
+  - "NZDUSD"
+  - "XAU/USD"
+  - "XAGUSD"
+  - "USOIL"
+  - "US500"
+
+
+
+# Timeframes for Futures signals
+futures:
+  enabled: true
+  # Short-term profile (crypto):
+  # Trend = 15m, Entry = 1m, S/R = 5m, HTF = 1h
+  trend_tf: "15m"
+  entry_tf: "1m"
+  sr_tf: "5m"
+  htf: "1h"         # Higher timeframe for MTF confirmation
+
+# Macro assets (Gold, Oil, FX, Indices)
+# Uses larger timeframes by default; if Yahoo fallback is active, 1m can be sparse.
+futures_macro:
+  enabled: true
+  trend_tf: "1h"
+  entry_tf: "15m"
+  sr_tf: "30m"
+  htf: "4h"
+
+
+# Data fetch limit (balanced fast mode)
+limit: 300
+
+# Scan interval in seconds
+scan_interval_seconds: 45
+
+# Cooldown between same signals (minutes)
+cooldown_minutes: 12
+
+# Risk Management
+risk:
+  buffer_pct: 0.35
+  rr_tp1: 1.0
+  rr_tp2: 2.5              # raised from 2.0 — wider TP2 for better risk/reward
+  quick_tp_pct: 0.25        # short-term TP target (% move from entry) [raised from 0.18 to cover fees]
+  quick_tp_min_pct: 0.12    # minimum realistic short-term TP move (%) [raised from 0.08]
+  min_rr_tp1: 0.25          # relaxed: allow setups with tighter TP1 while market is compressed
+  max_sl_pct_crypto: 1.80   # hard cap: skip crypto trades if SL distance exceeds this %
+  max_sl_pct_macro: 2.20    # hard cap for macro symbols (gold/oil/indices/fx)
+  quick_tp1_fraction: 0.50  # cap quick TP as fraction of TP1 distance
+  quick_tp_outcome_enabled: true  # close tracked outcome on quick TP hit
+  break_even_after_tp1: true
+  break_even_buffer_pct: 0.02      # move SL to entry +/- this %
+  trailing_after_tp1: true
+  trailing_rr_from_risk: 0.70      # trailing distance = risk_distance * this factor
+  trailing_min_move_pct: 0.10      # minimum trailing distance in % terms
+  atr_stop_mult: 2.2        # raised from 1.8 — fix stop_too_tight: wider SL clears market noise
+  atr_buffer_mult: 0.45  # raised from 0.30 — extra ATR buffer beyond zone/fallback stop
+  tp2_atr_mult: 4.0         # ATR multiplier used for long-range TP2
+  timeframe_quick_tp_scale:
+    "1m": 0.70
+    "3m": 0.80
+    "5m": 0.90
+    "15m": 1.00
+    "1h": 1.15
+    "4h": 1.30
+  timeframe_tp2_rr_scale:
+    "1m": 0.90
+    "3m": 0.95
+    "5m": 1.00
+    "15m": 1.10
+    "1h": 1.25
+    "4h": 1.40
+
+# Partial Exit — close 60% at TP1, let 40% run to TP2
+# Significantly improves average PnL on winning trades
+partial_exit:
+  enabled: true
+  tp1_exit_pct: 0.75         # close this fraction at TP1 (75%)
+  remainder_pct: 0.25        # let this fraction run to TP2/trail (25%)
+  min_rr_to_enable: 0.1      # apply even for small RR
+
+# Market regime (uptrend/downtrend/sideways/high-volatility)
+regime:
+  enabled: true
+  adx_trend_min: 22.0
+  ema200_slope_abs_min: 0.0015
+  high_vol_atr_pct: 1.2
+  sideways_threshold_add: 1
+  high_vol_threshold_add: 1
+  aligned_score_bonus: 0.6
+  countertrend_score_penalty: 1.0
+  quick_tp_scale_sideways: 0.8
+  quick_tp_scale_high_vol: 0.75
+
+# Scoring Configuration
+scoring:
+  base_threshold: 5
+  base_threshold_crypto: 4.3
+  base_threshold_macro: 2.4
+  add_timing_to_score: true
+  max_timing_points_used: 4
+  dynamic_threshold_enabled: true
+  dynamic_low_vol_atr_pct: 0.45
+  dynamic_high_vol_atr_pct: 1.25
+  dynamic_low_vol_adjust: -0.5
+  dynamic_high_vol_adjust: 0.8
+  dynamic_strong_trend_adx_min: 28.0
+  dynamic_strong_trend_adjust: -0.5
+  min_threshold: 2.0
+# Adaptive Learning (trained from historical outcomes)
+learning:
+  enabled: true
+  lookback_days: 90                  # reduced from 365 — focus on recent market conditions
+  retrain_interval_minutes: 10       # reduced from 15 — retrain more frequently
+  min_closed_trades: 40
+  min_symbol_side_trades: 5          # reduced from 6 — make decisions faster per symbol
+  min_expected_winrate: 0.47
+  min_expected_pnl_pct: -0.05
+  hard_block_winrate: 0.42           # blocks bad symbol/side when block_on_low_quality=true
+  score_bonus_max: 1.0
+  score_penalty_max: 1.5             # LIVE: raised from 0.0 — learning engine now penalizes losing patterns
+  block_on_low_quality: true         # LIVE: blocks symbol/side with WR < hard_block_winrate + enough samples
+  decision_mode: "hybrid"   # options: hybrid | learning_only
+  decision_min_samples: 30           # reduced from 40 — trust the data sooner
+  decision_min_winrate: 0.50
+  decision_min_pnl_pct: -0.02
+  decision_min_expectancy_pct: -0.03 # favor expectancy, but keep enough trade flow for learning
+  decision_min_edge_pct: 0.002
+  optimize_for_expectancy: true
+  expectancy_weight: 1.35
+  hybrid_min_expectancy_pct: -1.00   # gate effectively off for now (keep trade flow)
+  # Suggested barrier for later:
+  # hybrid_min_expectancy_pct: -0.12
+  exclude_seeded_outcomes: false
+  include_only_real_outcomes: false   # blended mode: learn from all data with weights
+  seeded_weight: 0.10                # reduced from 0.25 — old historical data has minimal influence
+  recency_half_life_days: 10         # reduced from 21 — recent trades count MUCH more
+  estimated_roundtrip_cost_pct_crypto: 0.08  # fees+spread+slippage estimate (in % pnl terms)
+  estimated_roundtrip_cost_pct_macro: 0.03
+  use_regime_profile: true
+  regime_blend_strength: 0.40        # slightly stronger regime awareness (was 0.35)
+  regime_min_samples: 6              # reduced from 8 — react to regime changes faster
+  hard_block_requires_full_local_samples: false
+
+# BTC Market Pulse — blocks crypto ALTcoin LONGs when BTC trend is bearish
+btc_pulse:
+  enabled: false
+  symbol: "BTC/USDT:USDT"     # reference symbol
+  trend_tf: "15m"              # timeframe to assess BTC trend
+  block_altcoin_long_on_down: true   # if BTC down → no altcoin LONG
+  block_altcoin_short_on_up: false   # optional: block altcoin SHORTs when BTC is up
+
+# Crypto session filter — data-driven from backtest of 8,142 real trades
+# Hours with net negative PnL → penalise more; good hours left free
+crypto_session:
+  enabled: true
+  mode: "cautious"             # cautious = raises threshold (not a hard block)
+
+  # Tier 1 — High penalty: genuinely bad hours (net negative PnL, WR < 47%)
+  # 02:00 net=-0.067%, WR=46.3% | 03:00 net=+0.033%, WR=44.5%
+  # 14:00 net=-0.010%, WR=48.9% | 16:00 net=-0.062%, WR=46.0%
+  # 18:00 net=-0.144%, WR=45.2%
+  threshold_add: 1.2
+  blocked_utc_windows:
+    - "02:00-04:00"            # Worst Asia hours — WR 44-46%, net negative
+    - "14:00-15:00"            # Weak afternoon — net barely negative
+    - "16:00-17:00"            # Weak — net -0.062%
+    - "18:00-19:00"            # Worst evening — net -0.144%
+
+  # Tier 2 — Low penalty: below-average but not terrible (handled in code)
+  # 00:00 WR=53.6% ✅  01:00 WR=52.8% ✅  04:00 WR=51.4% ✅ → FREE
+  # 06:00 WR=46.4%, 07:00 WR=48.0% → slight penalty
+  cautious_windows:            # these only add 0.5 (softer penalty)
+    - "06:00-08:00"
+
+# Entry quality filters (before sending new signals)
+quality_filter:
+  enabled: true
+  max_spread_pct: 0.22
+  min_volume_ratio: 0.35
+  min_volume_ratio_macro: 0.00
+  require_learning_alignment: false   # do not veto entries from learning policy while in learning phase
+  learning_min_samples: 10
+  max_negative_learning_adjustment: -0.4
+  # Suggested barrier mode for later:
+  # require_learning_alignment: true
+  # learning_min_samples: 10
+  # max_negative_learning_adjustment: -0.4
+  # News handling policy: warn only (do NOT block signal dispatch)
+  block_during_high_impact_news: true
+  high_impact_news_mode: "cautious"    # raises threshold instead of hard block
+  high_impact_threshold_add: 1.0       # raised from 0.0 — meaningful penalty during news windows
+  block_on_opposing_news: false
+  opposing_news_score: 0.9
+  opposing_news_score_macro: 1.6
+  relaxed_volume_mode: true
+  min_volume_ratio_relaxed: 0.28
+  volume_relax_adx_min: 24.0
+  volume_relax_max_spread_pct: 0.16
+  volume_relax_min_score_margin: -0.20
+  anti_chasing_atr_mult: 2.5           # fix late_entry: block if price moved > 2.5x ATR in last 3 bars
+  anti_chasing_lookback_bars: 3
+  # HTF workflow: Market Structure + POI + Raid + LTF confirmation
+  htf_context_enabled: true
+  htf_structure_lookback: 60
+  htf_raid_lookback: 40
+  htf_poi_max_distance_pct: 0.35
+  htf_structure_bonus: 1.0
+  htf_structure_penalty: 1.3
+  htf_poi_bonus: 1.2
+  htf_poi_penalty: 1.2
+  htf_raid_bonus: 0.8
+  htf_raid_penalty: 0.6
+  ltf_confirmation_min_signals: 1
+  ltf_confirmation_bonus: 0.8
+  ltf_no_confirmation_penalty: 1.0
+  macro_session_filter_enabled: true
+  macro_session_mode: "cautious"      # options: block | cautious
+  macro_session_threshold_add: 0.15
+  macro_session_utc_windows:
+    - "06:00-16:30"
+    - "13:00-20:00"
+  # LLM execution adapters: convert repeated loss tags into live behavior.
+  llm_adapter_enabled: true
+  llm_adapter_shadow_mode: false      # LIVE: adapter now raises threshold based on repeated mistakes
+  llm_adapter_lookback_days: 21
+  llm_adapter_min_reviews: 3
+  llm_adapter_min_confidence: 60
+  llm_adapter_late_entry_ratio: 0.45
+  llm_adapter_stop_tight_ratio: 0.45
+  llm_adapter_news_ratio: 0.35
+  llm_adapter_regime_ratio: 0.35
+  llm_adapter_onchain_against_ratio: 0.35
+  llm_adapter_onchain_low_reliability_ratio: 0.45
+  llm_adapter_threshold_add_late: 0.35  # fix late_entry: +0.35 threshold when ratio > 45%
+  llm_adapter_threshold_add_stop: 0.35  # raised from 0.20 — fix stop_too_tight: stronger penalty
+  llm_adapter_threshold_add_news: 0.50  # raised from 0.30 — fix ignored_news_risk: stronger penalty
+  llm_adapter_threshold_add_regime: 0.25
+  llm_adapter_threshold_add_onchain_against: 0.30
+  llm_adapter_threshold_add_onchain_reliability: 0.20
+  llm_adapter_onchain_min_reliability: 0.45
+  llm_adapter_onchain_max_age_minutes: 360
+  altcoin_correlation_filter_enabled: false  # keep flow high during learning phase
+  max_correlated_altcoin_same_dir: 2
+  correlation_window_minutes: 30
+  # Suggested barrier mode for later:
+  # altcoin_correlation_filter_enabled: true
+  # max_correlated_altcoin_same_dir: 2
+  # correlation_window_minutes: 30
+
+# Order Flow Integration (Open Interest & Liquidations insight)
+order_flow:
+  enabled: true
+  min_open_interest_usd: 5000000      # 5M USD minimum OI to consider reliable
+  short_squeeze_funding_threshold: -0.05 # Add score if funding is highly negative
+  long_squeeze_funding_threshold: +0.05  # Add score if funding is highly positive
+  score_boost: 2.0                    # Score added when liquidity squeeze is detected
+
+# On-chain analysis (crypto only)
+onchain:
+  enabled: true
+  advisory_only: true                 # analyze + explain only, no score gate while learning phase
+  provider: "coinmetrics"
+  cache_ttl_minutes: 20
+  lookback_days: 8
+  positive_change_threshold_pct: 5.0  # normalize "strong" activity jump
+  score_boost_max: 1.2                # used only when advisory_only=false
+  # Suggested barrier mode for later:
+  # advisory_only: false
+  # min_reliability_to_score: 0.45
+  request_timeout_seconds: 10
+  use_reliability_weighting: true
+  min_reliability_to_score: 0.45
+  min_data_points: 8
+  freshness_half_life_minutes: 180
+
+# LLM postmortem learning from losing trades
+llm_postmortem:
+  enabled: true
+  only_losses: true
+  advisory_only: false                # LIVE: now applies score penalty to repeated loss patterns
+  backfill_existing_on_startup: true  # evaluate old closed losses that have no LLM review yet
+  startup_max_reviews: 40             # max historical reviews per bot restart
+  lookback_days: 21
+  min_confidence: 60
+  min_reviews_for_penalty: 2
+  penalty_max: 0.80
+  timeout_seconds: 45
+
+# Machine Learning Scoring Engine
+ml_engine:
+  enabled: true
+  min_win_probability_boost: 0.55     # If ML predicts > 55% win probability, add score
+  max_win_probability_penalty: 0.45   # If ML predicts < 45% win probability, add threshold
+  ml_score_boost: +1.5                # Add to total_score
+  ml_threshold_penalty: +1.5          # Add to threshold
+
+  block_during_high_impact_news: true
+  high_impact_news_mode: "cautious"   # options: block | cautious
+  high_impact_threshold_add: 0.2
+  block_on_opposing_news: false
+  opposing_news_score: 0.9
+  opposing_news_score_macro: 1.6
+  require_learning_alignment: true
+  learning_min_samples: 10
+  max_negative_learning_adjustment: -0.4
+  # Altcoin correlation filter: don't send same-direction signals on
+  # correlated assets within a short window (they all follow BTC)
+  altcoin_correlation_filter_enabled: true
+  max_correlated_altcoin_same_dir: 2   # max LONGs/SHORTs on altcoins per window
+  correlation_window_minutes: 30        # lookback window in minutes
+
+# Portfolio-level risk controls
+portfolio_risk:
+  enabled: false
+  daily_loss_limit_pct: -3.0
+  max_open_positions: 3
+  max_consecutive_losses: 4
+  loss_streak_cooldown_minutes: 90
+  # Suggested safeguards for later (keep disabled now to maximize learning flow):
+  # enabled: true
+  # daily_loss_limit_pct: -2.5
+  # max_open_positions: 3
+  # max_consecutive_losses: 4
+  # loss_streak_cooldown_minutes: 60
+
+# Shadow mode for side-by-side comparison (does NOT change live decision)
+quality_first:
+  enabled: true
+  name_ar: "الجودة أهم"
+  htf_adx_min: 22.0
+  require_ema_alignment: true
+  allow_counter_trend: false
+  require_zone_proximity: true
+  max_zone_distance_pct: 0.30
+  require_candle_confirmation: true
+  min_pattern_strength: 2
+  min_volume_ratio: 0.95
+  max_spread_pct: 0.18
+  avoid_high_impact_news: true
+  min_rr_tp1: 1.0
+  min_rr_tp2: 1.8
+
+# Advisory-only section in Telegram (does NOT affect entries/exits)
+schools:
+  enabled: true
+  advisory_only: true
+
+# Time Analysis Configuration
+time_analysis:
+  enabled: true
+  gann_angles: false   # disabled: empirically caused over-scoring (score 9+ lost more than score 7)
+  square9: false       # disabled: same reason — adding noise not signal
+  fibonacci: true
+  cycle_52: true
+  lunar: false         # disabled: lunar correlation not statistically significant in data
+  fomc_filter: true
+  cpi_filter: true
+  nfp_filter: true
+  powell_filter: true
+  fomc_minutes_filter: true
+  sentiment_filter: true
+  social_sentiment_filter: false
+  lunar_window_hours: 24
+  fomc_high_vol_days: 2
+  cpi_high_vol_days: 1
+  nfp_high_vol_days: 1
+  powell_high_vol_hours: 24
+  fomc_minutes_high_vol_days: 0    # disabled: market absorbs minutes instantly
+  sentiment_extreme_fear: 25
+  sentiment_extreme_greed: 75
+  social_sentiment_min_posts: 20
+  social_sentiment_caution_ratio: 0.52
+  social_sentiment_extreme_ratio: 0.60
+  zone_proximity_pct: 0.15
+  expert_advisor: true
+  expert_advisor_timeout_seconds: 75
+  manager_advisor: true
+  manager_advisor_timeout_seconds: 75
+  expert_use_as_filter: false
+  expert_min_confidence: 55
+  expert_block_on_wait: false
+  expert_require_side_alignment: false
+  exit_min_hold_minutes: 8
+  exit_min_pattern_strength: 3
+  exit_reverse_confirmation_bars: 2
+
+# Telegram Configuration
+# Credentials are read from environment variables:
+# - TELEGRAM_BOT_TOKEN
+# - TELEGRAM_CHAT_ID
+telegram:
+  enabled: true
+
+# OpenAI Configuration
+# API key is read from environment variable:
+# - OPENAI_API_KEY
+openai:
+  enabled: true
+  model: "gpt-4o-mini"
+
+# Ollama Configuration
+ollama:
+  enabled: false
+  model: "llama3.2:3b"
+  base_url: "http://host.docker.internal:11434"
+
+# Logging
+logging:
+  level: INFO
+  file: "signal_bot.log"

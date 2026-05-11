@@ -1,0 +1,4 @@
+"""
+Crypto Signal Bot Tests
+=======================
+"""
