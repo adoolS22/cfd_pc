@@ -192,8 +192,8 @@ regime:
 
 # Scoring Configuration
 scoring:
-  base_threshold: 5
-  base_threshold_crypto: 4.3
+  base_threshold: 3.5
+  base_threshold_crypto: 2.8
   base_threshold_macro: 2.4
   add_timing_to_score: true
   max_timing_points_used: 4
@@ -203,8 +203,8 @@ scoring:
   dynamic_low_vol_adjust: -0.5
   dynamic_high_vol_adjust: 0.8
   dynamic_strong_trend_adx_min: 28.0
-  dynamic_strong_trend_adjust: -0.5
-  min_threshold: 2.0
+  dynamic_strong_trend_adjust: -0.8
+  min_threshold: 1.5
 # Adaptive Learning (trained from historical outcomes)
 learning:
   enabled: true
@@ -494,14 +494,14 @@ telegram:
 # API key is read from environment variable:
 # - OPENAI_API_KEY
 openai:
-  enabled: true
+  enabled: false
   model: "gpt-4o-mini"
 
 # Ollama Configuration
 ollama:
-  enabled: false
-  model: "llama3.2:3b"
-  base_url: "http://host.docker.internal:11434"
+  enabled: true
+  model: "llama3.2"
+  base_url: "http://127.0.0.1:11434"
 
 # Logging
 logging:

@@ -282,15 +282,22 @@ def build_expert_context(config: Config, result, df_entry_slice: pd.DataFrame) -
 
 def run_backtest(args: argparse.Namespace) -> Dict:
     config = load_config(args.config)
-    if not config.openai.enabled or not config.openai.api_key:
-        raise RuntimeError("OpenAI is not enabled or OPENAI_API_KEY is missing.")
+    if getattr(config.ollama, "enabled", False):
+        expert_openai_config = OpenAIConfig(
+            enabled=True,
+            api_key="ollama",  # dummy key
+            model=args.model or getattr(config.ollama, "model", "llama3.2:3b"),
+            base_url=str(getattr(config.ollama, "base_url", "http://127.0.0.1:11434/v1")).rstrip("/") + "/v1" if "v1" not in str(getattr(config.ollama, "base_url", "")) else str(getattr(config.ollama, "base_url", "")),
+        )
+    else:
+        if not config.openai.enabled or not config.openai.api_key:
+            raise RuntimeError("OpenAI is not enabled or OPENAI_API_KEY is missing. Enable Ollama if local.")
 
-    # Keep original OpenAI config for expert calls.
-    expert_openai_config = OpenAIConfig(
-        enabled=True,
-        api_key=config.openai.api_key,
-        model=args.model or config.openai.model,
-    )
+        expert_openai_config = OpenAIConfig(
+            enabled=True,
+            api_key=config.openai.api_key,
+            model=args.model or config.openai.model,
+        )
 
     # Backtest analysis config:
     # - Always disable embedded expert call (we call it explicitly and evaluate it).
@@ -304,8 +311,8 @@ def run_backtest(args: argparse.Namespace) -> Dict:
         bt_config.time_analysis.enabled = False
 
     exchange = get_exchange(
-        bt_config.exchange_name,
-        bt_config.market_type,
+        "binance",
+        "linear",
         getattr(bt_config, "mt5_bridge", None),
         getattr(bt_config, "mt5", None),
     )
