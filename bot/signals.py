@@ -1489,8 +1489,14 @@ def analyze_symbol(
         if (last_sweep.direction == 'bullish' and potential_side == 'LONG') or \
            (last_sweep.direction == 'bearish' and potential_side == 'SHORT'):
             _sweep_near = True
-            _smc_confluence += 1
-            _smc_reasons.append(f"✓ {last_sweep.direction.title()} Liquidity Sweep")
+            
+            last_kz = getattr(last_sweep, 'killzone', 'None')
+            if last_kz in ['London', 'NewYork']:
+                _smc_confluence += 2  # Stronger institutional bonus
+                _smc_reasons.append(f"✓ {last_kz} Killzone {last_sweep.direction.title()} Sweep")
+            else:
+                _smc_confluence += 1
+                _smc_reasons.append(f"✓ {last_sweep.direction.title()} Liquidity Sweep")
 
     # 3. Fair Value Gaps (FVG) — magnet check
     nearest_fvg_target = get_nearest_unmitigated_fvg(fvgs, current_price, potential_side)

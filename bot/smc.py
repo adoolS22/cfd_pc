@@ -42,6 +42,26 @@ class LiquiditySweep:
     swept_price: float
     timestamp: pd.Timestamp
     index: int
+    killzone: str = "None"  # e.g., 'London', 'NewYork', 'Asian', 'None'
+
+def get_killzone_session(ts: pd.Timestamp) -> str:
+    """
+    Identifies the institutional trading killzone (based on UTC usually).
+    London Killzone: 07:00 - 10:00
+    New York Killzone: 12:00 - 15:00
+    London Close Killzone: 15:00 - 17:00
+    Asian Session / Accumulation: 00:00 - 06:00
+    """
+    hour = ts.hour
+    if 7 <= hour < 11:
+        return 'London'
+    elif 12 <= hour < 15:
+        return 'NewYork'
+    elif 15 <= hour < 17:
+        return 'LondonClose'
+    elif 0 <= hour < 6:
+        return 'Asian'
+    return 'None'
 
 
 def detect_fvgs(df: pd.DataFrame, lookback: int = 50) -> List[FVG]:
@@ -286,11 +306,13 @@ def detect_liquidity_sweeps(df: pd.DataFrame, lookback: int = 30, min_wick_pct: 
                 min_wick = sh_price * (min_wick_pct / 100)
                 # Filter: wick must be meaningful in size AND significant vs candle body
                 if wick_size >= min_wick and (candle_body == 0 or wick_size >= candle_body * 0.5):
+                    kz = get_killzone_session(df.index[-1])
                     sweeps.append(LiquiditySweep(
                         direction='bearish',
                         swept_price=sh_price,
                         timestamp=df.index[-1],
-                        index=recent_idx
+                        index=recent_idx,
+                        killzone=kz
                     ))
                     break
 
@@ -302,11 +324,13 @@ def detect_liquidity_sweeps(df: pd.DataFrame, lookback: int = 30, min_wick_pct: 
                 min_wick = sl_price * (min_wick_pct / 100)
                 # Filter: wick must be meaningful in size AND significant vs candle body
                 if wick_size >= min_wick and (candle_body == 0 or wick_size >= candle_body * 0.5):
+                    kz = get_killzone_session(df.index[-1])
                     sweeps.append(LiquiditySweep(
                         direction='bullish',
                         swept_price=sl_price,
                         timestamp=df.index[-1],
-                        index=recent_idx
+                        index=recent_idx,
+                        killzone=kz
                     ))
                     break
 
