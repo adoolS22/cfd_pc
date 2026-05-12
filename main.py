@@ -1714,19 +1714,30 @@ def check_open_outcomes(
                         if side == 'LONG' and price <= effective_stop:
                             if tp1_touched and trailing_enabled and trail_stop is not None and trail_stop > be_price:
                                 hit_outcome = 'TRAIL_HIT'
+                                price = trail_stop
                             elif tp1_touched and be_armed:
                                 hit_outcome = 'BE_HIT'
+                                price = be_price
                             else:
                                 hit_outcome = 'SL_HIT'
-                            pnl_pct = (price - entry) / entry * 100
+                                price = sl
+                                
+                            raw_pnl = (price - entry) / entry * 100
+                            pnl_pct = (_tp1_locked + raw_pnl * _remainder) if _partial_done else raw_pnl
+                            
                         elif side == 'SHORT' and price >= effective_stop:
                             if tp1_touched and trailing_enabled and trail_stop is not None and trail_stop < be_price:
                                 hit_outcome = 'TRAIL_HIT'
+                                price = trail_stop
                             elif tp1_touched and be_armed:
                                 hit_outcome = 'BE_HIT'
+                                price = be_price
                             else:
                                 hit_outcome = 'SL_HIT'
-                            pnl_pct = (entry - price) / entry * 100
+                                price = sl
+                                
+                            raw_pnl = (entry - price) / entry * 100
+                            pnl_pct = (_tp1_locked + raw_pnl * _remainder) if _partial_done else raw_pnl
             
             if hit_outcome:
                 storage.update_signal_outcome(outcome['id'], hit_outcome, price, pnl_pct)
