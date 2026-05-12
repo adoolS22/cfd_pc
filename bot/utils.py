@@ -134,7 +134,7 @@ class OpenAIConfig:
 class OllamaConfig:
     """Ollama configuration."""
     enabled: bool
-    model: str = "llama3.2:3b"
+    model: str = "qwen2.5:7b"
     base_url: str = "http://localhost:11434"
 
 
@@ -683,7 +683,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
 
     ollama_config = OllamaConfig(
         enabled=ollama_data.get('enabled', False),
-        model=ollama_data.get('model', 'llama3.2:3b'),
+        model=ollama_data.get('model', 'qwen2.5:7b'),
         base_url=ollama_data.get('base_url', 'http://localhost:11434')
     )
 

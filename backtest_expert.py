@@ -41,14 +41,32 @@ def fetch_ohlcv_range(
     limit: int = 1000,
 ) -> pd.DataFrame:
     """Fetch OHLCV between two timestamps using paginated ccxt calls."""
-    step_ms = _tf_to_ms(exchange, timeframe)
+    import ccxt
+    # Force use binance for historical fetching to bypass MT5 since bugs
+    fetch_exchange = ccxt.binance({
+        "options": {"defaultType": "future"},
+        "enableRateLimit": True,
+    })
+    
+    # Strip any extra suffixes from MT5 symbols like _futures
+    clean_symbol = symbol.split('_')[0].split(':')[0]
+    if not '/' in clean_symbol:
+        # e.g. BTCUSDT -> BTC/USDT if it doesn't match standard ccxt
+        clean_symbol = clean_symbol.replace('USDT', '/USDT')
+        
+    step_ms = _tf_to_ms(fetch_exchange, timeframe)
     cursor = since_ms
     rows: List[List[float]] = []
     guard = 0
 
     while cursor < until_ms and guard < 10000:
         guard += 1
-        batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=cursor, limit=limit)
+        try:
+            batch = fetch_exchange.fetch_ohlcv(clean_symbol, timeframe=timeframe, since=cursor, limit=limit)
+        except Exception as e:
+            logger.warning(f"Error fetching backtest history for {clean_symbol}: {e}")
+            break
+            
         if not batch:
             break
 
@@ -286,7 +304,7 @@ def run_backtest(args: argparse.Namespace) -> Dict:
         expert_openai_config = OpenAIConfig(
             enabled=True,
             api_key="ollama",  # dummy key
-            model=args.model or getattr(config.ollama, "model", "llama3.2:3b"),
+            model=args.model or getattr(config.ollama, "model", "qwen2.5:7b"),
             base_url=str(getattr(config.ollama, "base_url", "http://127.0.0.1:11434/v1")).rstrip("/") + "/v1" if "v1" not in str(getattr(config.ollama, "base_url", "")) else str(getattr(config.ollama, "base_url", "")),
         )
     else:

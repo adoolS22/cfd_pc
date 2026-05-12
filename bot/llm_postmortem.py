@@ -189,8 +189,12 @@ def evaluate_loss_postmortem(
     """
     if not getattr(postmortem_config, "enabled", False):
         return None
-    if not getattr(openai_config, "enabled", False) or not getattr(openai_config, "api_key", None):
-        logger.debug("LLM postmortem skipped: OpenAI disabled or missing API key")
+    # Support both OpenAI and Ollama (Ollama doesn't strictly need an api_key, just base_url)
+    is_ollama = bool(getattr(openai_config, "base_url", None)) and "localhost" in str(getattr(openai_config, "base_url", ""))
+    has_api_key = bool(getattr(openai_config, "api_key", None))
+    
+    if not getattr(openai_config, "enabled", False) or (not has_api_key and not is_ollama):
+        logger.debug("LLM postmortem skipped: AI disabled or missing API key/Ollama config")
         return None
 
     max_penalty = max(0.0, float(getattr(postmortem_config, "penalty_max", 0.8)))
@@ -202,9 +206,17 @@ def evaluate_loss_postmortem(
     }
 
     try:
+        # For Ollama, the api_key can be anything, e.g. "ollama"
+        api_key = getattr(openai_config, "api_key", None) or "ollama"
+        base_url = openai_config.base_url if hasattr(openai_config, "base_url") else None
+        
+        # Ensure Ollama base_url gets the /v1 suffix required by OpenAI library
+        if base_url and not base_url.endswith("/v1"):
+            base_url = base_url.rstrip("/") + "/v1"
+            
         client = OpenAI(
-            api_key=openai_config.api_key,
-            base_url=openai_config.base_url if hasattr(openai_config, "base_url") else None,
+            api_key=api_key,
+            base_url=base_url,
             timeout=timeout_seconds,
         )
         response = client.chat.completions.create(

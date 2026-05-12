@@ -336,9 +336,14 @@ def _run_llm_postmortem_worker(db_path: str, outcome_id: int, config: Config) ->
         if onchain_snapshot:
             context["onchain_snapshot"] = onchain_snapshot
 
+        # Prefer ollama config if available and enabled
+        llm_client_config = getattr(config, "ollama", None)
+        if not llm_client_config or not getattr(llm_client_config, "enabled", False):
+            llm_client_config = config.openai
+
         result = evaluate_loss_postmortem(
             trade_context=context,
-            openai_config=config.openai,
+            openai_config=llm_client_config,
             postmortem_config=post_cfg,
         )
         if result is None:
@@ -429,15 +434,21 @@ def _run_llm_postmortem_backfill_worker(db_path: str, config: Config) -> None:
                 f"LLM postmortem backfill: evaluating {len(pending)} historical outcomes "
                 f"(lookback={lookback_days}d, limit={startup_limit})"
             )
-            for row in pending:
+            import concurrent.futures
+            def _process_one(row_data):
                 try:
-                    oid = int(row.get("id") or 0)
-                except Exception:
-                    oid = 0
-                if oid <= 0:
-                    continue
-                _run_llm_postmortem_worker(db_path=db_path, outcome_id=oid, config=config)
-                time.sleep(0.2)
+                    try:
+                        oid = int(row_data.get("id") or 0)
+                    except Exception:
+                        oid = 0
+                    if oid > 0:
+                        _run_llm_postmortem_worker(db_path=db_path, outcome_id=oid, config=config)
+                except Exception as e:
+                    logger.error(f"Error in _process_one: {e}")
+                    
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                # Force iteration to catch errors
+                list(executor.map(_process_one, pending))
 
         # Enrich old reviews as tagging logic evolves (no extra LLM/API calls).
         enrich_limit = max(120, startup_limit * 3)
@@ -2570,62 +2581,67 @@ def scan_symbol(
                         client.connect_mt5()
                         
                     sym_info = client.get_symbol_info(symbol)
-                    vol_min = sym_info.get("symbol_info", {}).get("volume_min", 0.01) if sym_info else 0.01
-                    vol_step = sym_info.get("symbol_info", {}).get("volume_step", 0.01) if sym_info else 0.01
                     
-                    base_lot = float(auto_trade_cfg.get("fixed_lot", 0.01))
-                    
-                    # Force minimum lot for Gold, Silver, Indices, etc as requested
-                    is_macro = any(m in symbol.upper() for m in ["XAU", "XAG", "US500", "USOIL", "USD"])
-                    if is_macro:
-                        base_lot = vol_min
+                    trade_mode = sym_info.get("trade_mode", 4)
+                    if trade_mode == 0:
+                        logger.info(f"Auto-trade skipped. Trading is disabled by broker for {symbol}.")
+                    else:
+                        vol_min = sym_info.get("volume_min", sym_info.get("symbol_info", {}).get("volume_min", 0.01)) if sym_info else 0.01
+                        vol_step = sym_info.get("volume_step", sym_info.get("symbol_info", {}).get("volume_step", 0.01)) if sym_info else 0.01
                         
-                    base_lot = max(base_lot, vol_min)
-                    base_lot = round(base_lot / vol_step) * vol_step
-                    
-                    # Safe split calculation
-                    if base_lot >= (vol_min * 2):
-                        lot1 = max(vol_min, round((base_lot * 0.75) / vol_step) * vol_step)
-                        lot2 = round((base_lot - lot1) / vol_step) * vol_step
-                        if lot2 < vol_min:
+                        base_lot = float(auto_trade_cfg.get("fixed_lot", 0.01))
+                        
+                        # Force minimum lot for Gold, Silver, Indices, etc as requested
+                        is_macro = any(m in symbol.upper() for m in ["XAU", "XAG", "US500", "USOIL", "USD"])
+                        if is_macro:
+                            base_lot = vol_min
+                            
+                        base_lot = max(base_lot, vol_min)
+                        base_lot = round(base_lot / vol_step) * vol_step
+                        
+                        # Safe split calculation
+                        if base_lot >= (vol_min * 2):
+                            lot1 = max(vol_min, round((base_lot * 0.75) / vol_step) * vol_step)
+                            lot2 = round((base_lot - lot1) / vol_step) * vol_step
+                            if lot2 < vol_min:
+                                lot1 = base_lot
+                                lot2 = 0.0
+                        else:
                             lot1 = base_lot
                             lot2 = 0.0
-                    else:
-                        lot1 = base_lot
-                        lot2 = 0.0
+                            
+                        logger.info(f"Auto-trading execution triggered for {symbol} ({result.side}) with lot={base_lot} (split: {lot1} TP1, {lot2} TP2)")
                         
-                    logger.info(f"Auto-trading execution triggered for {symbol} ({result.side}) with lot={base_lot} (split: {lot1} TP1, {lot2} TP2)")
-                    
-                    # Execute T1 (75% or 100%)
-                    trade_res = client.execute_trade(
-                        symbol=symbol,
-                        side=result.side,
-                        lot=lot1,
-                        sl=result.risk_levels.stop_loss if hasattr(result.risk_levels, "stop_loss") else 0.0,
-                        tp=result.risk_levels.take_profit_1 if hasattr(result.risk_levels, "take_profit_1") else 0.0,
-                    )
-                    
-                    if trade_res:
-                        logger.info(f"Successfully placed MT5 TP1 trade! Ticket: {trade_res.get('order')}")
+                        # Execute T1 (75% or 100%)
+                        trade_res = client.execute_trade(
+                            symbol=symbol,
+                            side=result.side,
+                            lot=lot1,
+                            sl=result.risk_levels.stop_loss if hasattr(result.risk_levels, "stop_loss") else 0.0,
+                            tp=result.risk_levels.take_profit_1 if hasattr(result.risk_levels, "take_profit_1") else 0.0,
+                        )
                         
-                        # --- PARTIAL EXECUTION / SCALE OUT: Trade 2 for TP2 ---
-                        trade_res2 = None
-                        if lot2 > 0:
-                            trade_res2 = client.execute_trade(
-                                symbol=symbol,
-                                side=result.side,
-                                lot=lot2,
-                                sl=result.risk_levels.stop_loss if hasattr(result.risk_levels, "stop_loss") else 0.0,
-                                tp=result.risk_levels.take_profit_2 if hasattr(result.risk_levels, "take_profit_2") else 0.0,
-                            )
-                        
-                        ticket_msg = f"T1: {trade_res.get('order')}"
-                        if trade_res2:
-                            ticket_msg += f" | T2: {trade_res2.get('order')}"
-                            logger.info(f"Successfully placed MT5 TP2 trade! Ticket: {trade_res2.get('order')}")
+                        if trade_res:
+                            logger.info(f"Successfully placed MT5 TP1 trade! Ticket: {trade_res.get('order')}")
+                            
+                            # --- PARTIAL EXECUTION / SCALE OUT: Trade 2 for TP2 ---
+                            trade_res2 = None
+                            if lot2 > 0:
+                                trade_res2 = client.execute_trade(
+                                    symbol=symbol,
+                                    side=result.side,
+                                    lot=lot2,
+                                    sl=result.risk_levels.stop_loss if hasattr(result.risk_levels, "stop_loss") else 0.0,
+                                    tp=result.risk_levels.take_profit_2 if hasattr(result.risk_levels, "take_profit_2") else 0.0,
+                                )
+                            
+                            ticket_msg = f"T1: {trade_res.get('order')}"
+                            if trade_res2:
+                                ticket_msg += f" | T2: {trade_res2.get('order')}"
+                                logger.info(f"Successfully placed MT5 TP2 trade! Ticket: {trade_res2.get('order')}")
 
-                        if notifier.enabled:
-                            notifier.send_text(f"🤖 <b>Auto-Trade Executed (Split T1/T2):</b> {result.side} {symbol}\nLots: {lot1}|{lot2}\nTickets: {ticket_msg}")
+                            if notifier.enabled:
+                                notifier.send_text(f"🤖 <b>Auto-Trade Executed (Split T1/T2):</b> {result.side} {symbol}\nLots: {lot1}|{lot2}\nTickets: {ticket_msg}")
                 except Exception as e:
                     logger.error(f"MT5 Auto-trading execution failed for {symbol}: {e}")
             # --- END AUTO-TRADING HOOK ---
