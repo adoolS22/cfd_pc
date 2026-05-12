@@ -19,17 +19,19 @@ def generate_signal_chart(symbol: str, df: pd.DataFrame, signal, output_path: st
         
         # Add risk levels if they exist
         addplot_params = []
-        if hasattr(signal, 'risk_levels') and signal.risk_levels:
+        if hasattr(signal, 'risk_levels') and getattr(signal, 'risk_levels', None):
             rl = signal.risk_levels
             length = len(df_plot)
             
-            addplot_params.append(mpf.make_addplot([float(rl.entry)]*length, color='blue', linestyle='--', width=2.0))
-            addplot_params.append(mpf.make_addplot([float(rl.sl)]*length, color='red', linestyle='-.', width=2.0))
+            if hasattr(rl, 'entry') and rl.entry:
+                addplot_params.append(mpf.make_addplot([float(rl.entry)]*length, color='blue', linestyle='--', width=2.0))
+            if hasattr(rl, 'stop_loss') and rl.stop_loss:
+                addplot_params.append(mpf.make_addplot([float(rl.stop_loss)]*length, color='red', linestyle='-.', width=2.0))
             
-            if hasattr(rl, 'tp1') and rl.tp1:
-                addplot_params.append(mpf.make_addplot([float(rl.tp1)]*length, color='green', linestyle='-', width=1.5))
-            if hasattr(rl, 'tp2') and rl.tp2:
-                addplot_params.append(mpf.make_addplot([float(rl.tp2)]*length, color='darkgreen', linestyle='-', width=1.5))
+            if hasattr(rl, 'take_profit_1') and rl.take_profit_1:
+                addplot_params.append(mpf.make_addplot([float(rl.take_profit_1)]*length, color='green', linestyle='-', width=1.5))
+            if hasattr(rl, 'take_profit_2') and rl.take_profit_2:
+                addplot_params.append(mpf.make_addplot([float(rl.take_profit_2)]*length, color='darkgreen', linestyle='-', width=1.5))
                 
         style = mpf.make_mpf_style(base_mpf_style='charles', y_on_right=True)
         title = f"{symbol} - {signal.side} Signal"
