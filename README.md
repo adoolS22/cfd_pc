@@ -1,250 +1,159 @@
-# Crypto Trading Signal Bot
+# Crypto & Macro Trading Signal Bot
 
-A complete signal-only trading bot for **futures/macro signals** that generates LONG/SHORT/EXIT signals with Entry/SL/TP1/TP2 levels and sends them via Telegram.
+بوت إشارات تداول ذكي للعقود الآجلة (Futures) يعمل على الكريبتو والماكرو (ذهب، نفط، فوركس، مؤشرات).
+يُولّد إشارات LONG/SHORT/EXIT مع Entry/SL/TP1/TP2 ويرسلها عبر Telegram.
 
-## Features
-
-- **Multi-Timeframe Analysis**: Uses trend (4h), entry (15m), and S/R (1h) timeframes
-- **Technical Scoring**: Score-based signal generation with configurable thresholds
-- **Timing Analysis**: Gann angles, Square of 9, 52-cycle, lunar phases, FOMC calendar
-- **Risk Management**: Automated Entry/SL/TP calculation with configurable R:R ratios
-- **Telegram Notifications**: Formatted signals with all analysis details
-- **Flexible Market Source**: Binance/CCXT, direct MT5, or MT5 bridge (for broker-aligned pricing)
-
-## Project Structure
+## 🏗️ البنية الحالية
 
 ```
 crypto_signal_bot/
-├── main.py              # Entry point
-├── config.yaml          # Configuration
-├── requirements.txt     # Dependencies
-├── README.md            # This file
+├── main.py                  # نقطة الدخول الرئيسية + Scan Loop
+├── config.yaml              # الإعدادات الرئيسية
+├── signals.db               # قاعدة بيانات SQLite
 ├── bot/
-│   ├── __init__.py
-│   ├── exchange.py      # CCXT + MT5 bridge adapters
-│   ├── indicators.py    # SMA, EMA, RSI, ATR
-│   ├── zones.py         # S/R zone detection
-│   ├── patterns.py      # Fractals & candlestick patterns
-│   ├── gann.py          # Gann angles & Square of 9
-│   ├── time_cycles.py   # 52-cycle & lunar timing
-│   ├── calendar_events.py # FOMC schedule
-│   ├── signals.py       # Scoring engine
-│   ├── risk.py          # Entry/SL/TP calculations
-│   ├── notifier.py      # Telegram notifications
-│   ├── storage.py       # Cooldown tracking
-│   └── utils.py         # Utilities
-└── tests/               # Pytest tests
+│   ├── exchange.py          # محولات CCXT + MT5 Bridge + MT5 Direct
+│   ├── mt5_client.py        # اتصال مباشر بـ MetaTrader 5
+│   ├── indicators.py        # SMA, EMA, RSI, ATR, Bollinger, MACD...
+│   ├── zones.py             # كشف مناطق الدعم والمقاومة
+│   ├── patterns.py          # أنماط الشموع + Fractals
+│   ├── gann.py              # زوايا Gann + مربع 9
+│   ├── time_cycles.py       # دورة 52 + أطوار القمر
+│   ├── calendar_events.py   # FOMC + NFP + CPI + خطابات Powell
+│   ├── signals.py           # محرك التقييم (Scoring Engine)
+│   ├── risk.py              # حساب Entry/SL/TP
+│   ├── storage.py           # تخزين SQLite + تتبع النتائج + Shadow Tracking
+│   ├── notifier.py          # إشعارات Telegram
+│   ├── telegram_control.py  # أوامر التحكم عن بعد
+│   ├── learning_engine.py   # محرك التعلم التكيفي + Shadow Learning
+│   ├── quality_first.py     # فلتر الجودة
+│   ├── llm_postmortem.py    # تحليل ما بعد الصفقة بالذكاء الاصطناعي
+│   ├── ml_engine.py         # نموذج ML للتنبؤ
+│   ├── news_analyzer.py     # تحليل الأخبار
+│   ├── yahoo_data.py        # بيانات Yahoo Finance للماكرو
+│   └── utils.py             # أدوات مساعدة
+├── tests/                   # اختبارات Pytest
+└── backtests/               # أدوات الباك تست
 ```
 
-## Direct MT5 Feed
+## 🧠 أنظمة الذكاء في البوت
 
-If you want the bot to read prices and candles directly from MetaTrader 5 using the official Python package:
+### 1. محرك التعلم التكيفي (Adaptive Learning Engine)
+- يتدرب على آخر 21 يوم من نتائج الصفقات
+- يحسب winrate متوقعة لكل **رمز + اتجاه + نوع سوق + نظام سوق**
+- يعدّل تقييم الإشارات بناءً على الأداء التاريخي
+- يحظر الإشارات ذات التوقعات السلبية
 
-1. Install dependencies:
+### 2. نظام التعلم من المرفوضات (Shadow Learning) 🆕
+- **Shadow Tracking:** كل صفقة يرفضها الفلتر تُحفظ ويُتتبع سعرها
+- **تقييم القرارات:** يفحص هل الصفقة المرفوضة كانت ستربح أو ستخسر
+- **تغذية راجعة:** نتائج الصفقات المرفوضة تُدمج في بيانات التدريب
+- **تصحيح ذكي:** لكل رمز/اتجاه يُحسب "معدل الخطأ" ويُصحح تلقائياً
+- **تقرير يومي:** يُرسل على Telegram يوضح دقة قرارات الرفض
+
+### 3. تحليل ما بعد الصفقة (LLM Postmortem)
+- يستخدم الذكاء الاصطناعي لتحليل الصفقات الخاسرة
+- يحدد أخطاء مثل: `late_entry`, `stop_too_tight`, `ignored_news_risk`
+- يُطبّق عقوبات تلقائية على أنماط الدخول المتكررة الخاطئة
+
+### 4. نموذج التعلم الآلي (ML Engine)
+- يتدرب على ميزات الإشارات السابقة
+- يُعطي تقييم إضافي لكل إشارة جديدة
+
+## 📊 قاعدة البيانات
+
+| الجدول | الوظيفة |
+|--------|---------|
+| `signals` | الإشارات المُرسلة (رمز، اتجاه، سعر، SL، TP) |
+| `signal_outcomes` | نتائج الصفقات (TP_HIT, SL_HIT, TRAIL_HIT...) |
+| `llm_trade_reviews` | تحليلات AI لما بعد الصفقة |
+| `rejected_signals` | 🆕 الصفقات المرفوضة تحت التتبع (Shadow Tracking) |
+| `pending_entries` | إشارات تنتظر pullback للدخول |
+
+## ⚙️ مصادر البيانات
+
+| المصدر | الاستخدام |
+|--------|-----------|
+| **MT5 Direct** | ✅ المصدر الرئيسي الحالي (Exness) |
+| **Binance/CCXT** | بيانات كريبتو بديلة |
+| **Yahoo Finance** | بيانات ماكرو (XAU, OIL, SNP500) |
+| **MT5 Bridge** | خيار بديل عبر HTTP API |
+
+## 🚀 التشغيل
+
+### المتطلبات
+- Python 3.11+
+- MetaTrader 5 (مثبت ومسجل الدخول)
+- اتصال إنترنت
+
+### الإعداد
 ```bash
+# تثبيت المتطلبات
 pip install -r requirements.txt
+
+# إعداد ملف البيئة (.env)
+TELEGRAM_BOT_TOKEN=your_token
+TELEGRAM_CHAT_ID=your_chat_id
+MT5_LOGIN=your_login
+MT5_PASSWORD=your_password
+MT5_SERVER=your_server
+MT5_PATH=C:\Program Files\MetaTrader 5\terminal64.exe
 ```
 
-2. In `config.yaml`:
-- `exchange_name: mt5`
-- fill `mt5.login`
-- fill `mt5.password`
-- fill `mt5.server`
-- optionally set `mt5.path` to your `terminal64.exe`
-- set `mt5.symbol_suffix` / `mt5.symbol_map` to match your Market Watch symbols
-
-3. Put the symbols you want the bot to scan in `symbols:`.
-Examples:
-- `XAU/USD`
-- `EURUSD`
-- `BTC/USDT:USDT`
-
-Notes:
-- MT5 terminal must be installed on Windows and logged in to the target account.
-- `strict_mode: true` stops the bot if MT5 is unavailable.
-- The bot keeps using the same internal signal logic; only the market data source changes.
-
-## MT5 Real32 Bridge (Optional)
-
-If you want signals/outcomes to match your MT5 account feed:
-
-1. Run bridge server on the same machine that has MT5 terminal logged in:
+### التشغيل
 ```bash
-python mt5_real32_bridge_server.py
-```
-
-2. Set bridge token in `.env` (optional but recommended):
-```bash
-MT5_BRIDGE_TOKEN=your_shared_token
-```
-
-3. In `config.yaml`:
-- `exchange_name: mt5_bridge`
-- set `mt5_bridge.base_url` to bridge URL (docker on Mac can use `http://host.docker.internal:18080`)
-- fill `mt5_bridge.symbol_map` according to your Market Watch symbol names on Real32
-
-Note:
-- `strict_mode: true` -> bot stops if bridge is down.
-- `strict_mode: false` -> bot falls back to `fallback_exchange`.
-
-## Quick Start
-
-### 1. Install Dependencies
-
-Using Docker (recommended):
-```bash
-cd /Users/adel/trading
-docker-compose build
-docker-compose run --rm trading bash
-```
-
-Or using pip:
-```bash
-cd /Users/adel/trading/crypto_signal_bot
-pip install -r requirements.txt
-```
-
-### 2. Configure Telegram (Optional)
-
-Set environment variables:
-```bash
-export TELEGRAM_BOT_TOKEN="your_bot_token"
-export TELEGRAM_CHAT_ID="your_chat_id"
-```
-
-Or create a `.env` file in the project directory.
-
-Telegram runtime control commands (when bot is running):
-```text
-/pause   -> Pause scanning loop
-/resume  -> Resume scanning
-/status  -> Show runtime status
-/help    -> Show commands
-/stop    -> Stop bot process
-```
-
-### 3. Run the Bot
-
-Single scan (test mode):
-```bash
+# مسح واحد (اختبار)
 python main.py --once
-```
 
-Continuous scanning:
-```bash
+# تشغيل مستمر
 python main.py
-```
 
-With verbose logging:
-```bash
+# مع سجلات مفصلة
 python main.py -v
 ```
 
-## Configuration
+## 📱 أوامر Telegram
 
-Edit `config.yaml` to customize:
+| الأمر | الوظيفة |
+|-------|---------|
+| `/pause` | إيقاف مؤقت للمسح |
+| `/resume` | استئناف المسح |
+| `/status` | حالة البوت الحالية |
+| `/stop` | إيقاف البوت |
+| `/help` | عرض الأوامر |
 
-```yaml
-# Symbols to scan
-symbols:
-  - "BTC/USDT:USDT"
-  - "ETH/USDT:USDT"
-  - "SOL/USDT:USDT"
+## 📈 التقارير اليومية على Telegram
 
-# Scoring threshold
-scoring:
-  base_threshold: 7
-  add_timing_to_score: true
-  max_timing_points_used: 4
+1. **تقرير الأداء (WinRate):** نسبة الربح، عدد الصفقات، متوسط PnL
+2. **تقرير Shadow:** حالة الإشارات التجريبية
+3. **تقرير قرارات الرفض:** 🆕 دقة الرفض، فرص ضائعة، خسائر تم تجنبها
 
-# Risk parameters
-risk:
-  buffer_pct: 0.15   # SL buffer
-  rr_tp1: 1.0        # TP1 at 1:1 R:R
-  rr_tp2: 2.0        # TP2 at 1:2 R:R
-```
+## 🔒 إدارة المخاطر
 
-## Signal Scoring
+- **Quick TP:** هدف ربح قريب للخروج السريع
+- **TP1 + Break Even:** عند TP1 يُنقل الوقف لنقطة التعادل
+- **Trailing Stop:** وقف متحرك بعد TP1
+- **Partial Exit (60/40):** خروج 60% عند TP1، 40% يتابع لـ TP2
+- **Altcoin Correlation Filter:** يمنع تكديس إشارات متشابهة
+- **BTC Pulse:** يحظر LONG على العملات البديلة عندما BTC هابط
+- **Session Filter:** حذر إضافي في ساعات آسيا الميتة
 
-### Technical Score (max ~11 points)
-| Factor | Points |
-|--------|--------|
-| Trend match | +2 |
-| Price in S/R zone | +2 |
-| Candle pattern | +2 |
-| Volume spike | +2 |
-| Wave 3 setup | +2 |
-| RSI divergence against | -2 |
-
-### Timing Score (max 4 points, capped)
-| Factor | Points |
-|--------|--------|
-| Gann angle confluence | 0-2 |
-| Square of 9 proximity | 0-2 |
-| 52-cycle window | 0-1 |
-| Lunar event window | 0-1 |
-| FOMC high-vol window | -1-0 (filter) |
-
-A signal is generated when `total_score >= threshold` (default: 7).
-
-## Example Telegram Message
+## 🔄 دورة التعلم الكاملة
 
 ```
-🟢 LONG Signal: BTC/USDT:USDT
-
-📊 Score: 9.5/7 (Tech: 8, Timing: 1.5)
-📈 Trend: UP
-💰 Price: 97,245.50
-
-━━━━ Levels ━━━━
-▫️ Entry: 97,250.00
-🛑 Stop Loss: 95,800.00 (1.49%)
-🎯 TP1: 98,700.00 (1:1)
-🎯 TP2: 100,150.00 (1:2)
-
-━━━━ Technical Analysis ━━━━
-  ✓ Trend: up
-  ✓ At support zone
-  ✓ Bullish Engulfing
-  ✓ Volume spike
-
-━━━━ Timing Analysis ━━━━
-  Gann: above_angles (score: 1.0)
-  Sq9: 97,344.00 (0.10%, score: 0.5)
-
-⏱ Timeframes: 4h/15m/1h
-🕐 2026-02-04 19:15 UTC
+إشارة جديدة → Learning Filter → [قبول] → تنفيذ → نتيجة → تدريب
+                                → [رفض]  → Shadow Track → تقييم → تصحيح ذكي → تدريب
 ```
 
-## Running Tests
+## 📋 الرموز المدعومة حالياً
 
-```bash
-cd /Users/adel/trading/crypto_signal_bot
-pytest tests/ -v
-```
+### كريبتو
+BTC, ETH, SOL, BNB, XRP, ADA, DOGE, DOT, AVAX, LINK,
+UNI, AAVE, COMP, ENJ, THETA, SNX, XTZ, LTC, FIL
 
-## Important Notes
-
-- **No auto-trading**: This bot generates signals only
-- **No API keys needed**: Uses public Binance endpoints
-- **Public data only**: OHLCV and ticker data via ccxt
-- **FOMC data**: Fetched from federalreserve.gov and cached for 7 days
-
-## Troubleshooting
-
-### Rate Limiting
-The bot includes automatic rate limiting and exponential backoff. If you see rate limit errors, increase `scan_interval_seconds`.
-
-### Missing Lunar Data
-Install the `ephem` package for lunar phase analysis:
-```bash
-pip install ephem
-```
-
-### Telegram Not Working
-1. Check environment variables are set
-2. Verify bot token with BotFather
-3. Ensure chat_id is correct (use @userinfobot)
+### ماكرو
+XAUUSD (ذهب), XAGUSD (فضة), OILUSD/USOIL/WTIUSD (نفط),
+EURUSD, GBPUSD, USDJPY, USDCHF, AUDUSD, NZDUSD, USDCAD,
+SNP500/SPX500/US500 (مؤشرات)
 
 ## License
 

@@ -363,6 +363,56 @@ class AdaptiveLearningEngine:
             regime_bucket = regime_side_buckets.setdefault(regime_key, _Bucket())
             regime_bucket.add(label=label, pnl_val=pnl_val, weight=weight)
 
+        # ── Integrate shadow-tracked rejected signal outcomes ──────────
+        # Rejected signals that would have WON are fed back as "missed wins"
+        # to nudge the learning engine toward being less conservative.
+        # Rejected signals that would have LOST reinforce the filter.
+        shadow_integrated = 0
+        try:
+            with sqlite3.connect(db_path) as conn_shadow:
+                if self._table_exists(conn_shadow, "rejected_signals"):
+                    shadow_rows = conn_shadow.execute(
+                        """
+                        SELECT symbol, side, outcome, pnl_pct, closed_at,
+                               would_have_won, market_regime
+                        FROM rejected_signals
+                        WHERE closed_at IS NOT NULL
+                          AND closed_at >= ?
+                          AND outcome != 'TRACKING'
+                          AND pnl_pct IS NOT NULL
+                        """,
+                        (cutoff,),
+                    ).fetchall()
+
+                    # Shadow outcomes get a reduced weight (0.3x) so they inform
+                    # but don't dominate over actual live trade data.
+                    shadow_weight_mult = 0.3
+
+                    for sym, side_val, outcome, pnl_pct_val, closed_at_val, won, regime_val in shadow_rows:
+                        if pnl_pct_val is None:
+                            continue
+                        side_k = str(side_val or "").upper()
+                        if side_k not in ("LONG", "SHORT"):
+                            continue
+
+                        pnl_val = float(pnl_pct_val)
+                        label = 1 if won else 0
+                        weight = _recency_weight(closed_at_val, half_life_days) * shadow_weight_mult
+
+                        asset_cls = _infer_asset_class(sym)
+                        regime_name = str(regime_val or "sideways").strip().lower() or "sideways"
+
+                        global_bucket.add(label=label, pnl_val=pnl_val, weight=weight)
+                        side_buckets.setdefault(side_k, _Bucket()).add(label=label, pnl_val=pnl_val, weight=weight)
+                        asset_side_buckets.setdefault((asset_cls, side_k), _Bucket()).add(label=label, pnl_val=pnl_val, weight=weight)
+                        symbol_buckets.setdefault(sym, _Bucket()).add(label=label, pnl_val=pnl_val, weight=weight)
+                        symbol_side_buckets.setdefault((sym, side_k), _Bucket()).add(label=label, pnl_val=pnl_val, weight=weight)
+                        regime_side_buckets.setdefault((regime_name, side_k), _Bucket()).add(label=label, pnl_val=pnl_val, weight=weight)
+
+                        shadow_integrated += 1
+        except Exception as shadow_err:
+            logger.debug(f"Learning shadow integration skipped: {shadow_err}")
+
         snapshot = _LearningSnapshot(
             trained_at=now,
             total_closed=global_bucket.n,
@@ -377,7 +427,7 @@ class AdaptiveLearningEngine:
 
         logger.info(
             "Learning trained: closed={} live={} seeded={} seeded_weight={} lookback_days={} "
-            "half_life_days={} cost_crypto={} cost_macro={} filtered_no_pnl={}",
+            "half_life_days={} cost_crypto={} cost_macro={} filtered_no_pnl={} shadow_integrated={}",
             snapshot.total_closed,
             count_live,
             count_seeded,
@@ -387,6 +437,7 @@ class AdaptiveLearningEngine:
             float(getattr(config, "estimated_roundtrip_cost_pct_crypto", 0.08)),
             float(getattr(config, "estimated_roundtrip_cost_pct_macro", 0.03)),
             filtered_missing_pnl,
+            shadow_integrated,
         )
         return snapshot
 
@@ -479,6 +530,34 @@ class AdaptiveLearningEngine:
                     expected_pnl = ((1.0 - blend) * expected_pnl) + (blend * regime_pnl)
                     regime_note = f" regime={regime_key_name} n_reg={regime_bucket.n}"
 
+        # ── Shadow-informed intelligence: learn from rejected signals ──
+        # Query shadow outcomes for this symbol/side to see if the filter
+        # has been consistently wrong. If many rejected signals would have
+        # won, correct the expected winrate/pnl UPWARD based on evidence.
+        shadow_correction_wr = 0.0
+        shadow_correction_pnl = 0.0
+        shadow_note = ""
+        try:
+            shadow_stats = self._get_shadow_correction(db_path, symbol, side_key)
+            if shadow_stats["total"] >= 5:  # need at least 5 shadow outcomes
+                miss_rate = shadow_stats["missed_rate"]
+                if miss_rate > 0.15:  # >15% of rejections were missed opportunities
+                    # Apply a correction proportional to how wrong the filter is.
+                    # Max correction: +10% winrate, +0.15% pnl
+                    shadow_correction_wr = _clip(miss_rate * 0.5, 0.0, 0.10)
+                    shadow_correction_pnl = _clip(
+                        shadow_stats["avg_missed_pnl"] * 0.3, 0.0, 0.15
+                    )
+                    expected_wr += shadow_correction_wr
+                    expected_pnl += shadow_correction_pnl
+                    shadow_note = (
+                        f" shadow_corr(wr=+{shadow_correction_wr*100:.1f}%"
+                        f" pnl=+{shadow_correction_pnl:.2f}%"
+                        f" miss={miss_rate*100:.0f}% n={shadow_stats['total']})"
+                    )
+        except Exception:
+            pass
+
         # Map expected quality to a bounded score adjustment.
         # Expectancy-oriented mode gives more influence to expected net PnL.
         wr_delta = expected_wr - float(config.min_expected_winrate)
@@ -516,7 +595,7 @@ class AdaptiveLearningEngine:
             f"Learning: wr={expected_wr*100:.1f}% net_pnl={expected_pnl:+.2f}% "
             f"samples={sym_side_bucket.n} asset={asset_class} tf_bucket={tf_bucket} "
             f"n_asset={asset_side_bucket.n} n_asset_tf={asset_tf_side_bucket.n} "
-            f"adj={adjustment:+.2f} pnl_w={pnl_weight:.2f}{regime_note}"
+            f"adj={adjustment:+.2f} pnl_w={pnl_weight:.2f}{regime_note}{shadow_note}"
         )
         if not allow:
             reason = f"{reason} -> blocked"
@@ -529,6 +608,63 @@ class AdaptiveLearningEngine:
             sample_size=sym_side_bucket.n,
             reason=reason,
         )
+
+    @staticmethod
+    def _get_shadow_correction(
+        db_path: str,
+        symbol: str,
+        side: str,
+    ) -> Dict[str, Any]:
+        """
+        Compute per-symbol/side correction from shadow-tracked rejected signals.
+
+        Returns dict with:
+            total: number of closed shadow outcomes
+            missed_rate: fraction that would have won
+            avg_missed_pnl: average PnL of missed opportunities
+            correct_rate: fraction that were correctly rejected
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=21)).isoformat()
+        empty = {"total": 0, "missed_rate": 0.0, "avg_missed_pnl": 0.0, "correct_rate": 1.0}
+
+        try:
+            with sqlite3.connect(db_path) as conn:
+                # Check table exists
+                if not AdaptiveLearningEngine._table_exists(conn, "rejected_signals"):
+                    return empty
+
+                rows = conn.execute(
+                    """
+                    SELECT would_have_won, pnl_pct
+                    FROM rejected_signals
+                    WHERE symbol = ? AND side = ?
+                      AND outcome != 'TRACKING'
+                      AND closed_at IS NOT NULL
+                      AND created_at >= ?
+                    """,
+                    (str(symbol), str(side).upper(), cutoff),
+                ).fetchall()
+
+            if not rows:
+                return empty
+
+            total = len(rows)
+            won_rows = [r for r in rows if r[0] == 1]
+            missed = len(won_rows)
+            missed_pnls = [float(r[1] or 0) for r in won_rows if r[1] is not None]
+
+            return {
+                "total": total,
+                "missed_rate": missed / total if total > 0 else 0.0,
+                "avg_missed_pnl": (
+                    sum(missed_pnls) / len(missed_pnls)
+                    if missed_pnls
+                    else 0.0
+                ),
+                "correct_rate": (total - missed) / total if total > 0 else 1.0,
+            }
+        except Exception:
+            return empty
 
 
 _ENGINE = AdaptiveLearningEngine()

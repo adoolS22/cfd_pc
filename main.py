@@ -43,6 +43,7 @@ state_lock = threading.Lock()
 # Track last winrate report time
 _last_winrate_report: datetime = None
 _last_learning_health_report: datetime = None
+_last_rejected_report: datetime = None
 _risk_alert_timestamps: Dict[str, datetime] = {}
 
 
@@ -1890,6 +1891,252 @@ def send_walkforward_shadow_report(storage: SignalStorage, notifier: TelegramNot
         logger.debug(f"Walkforward shadow report failed: {e}")
 
 
+def _save_rejected_signal_shadow(
+    storage: SignalStorage,
+    symbol: str,
+    cooldown_symbol: str,
+    side: str,
+    ticker: Dict[str, Any],
+    result: Any,
+    rejection_reason: str,
+    rejection_source: str = "learning_filter",
+) -> None:
+    """
+    Save a rejected signal for shadow tracking so the bot can evaluate
+    whether the rejection was correct by monitoring what would have happened.
+    """
+    try:
+        entry_price = float(ticker.get('last', 0) or 0)
+        if entry_price <= 0:
+            return
+
+        # Use risk_levels if available, otherwise estimate from result
+        sl = 0.0
+        tp1 = 0.0
+        tp2 = 0.0
+        tp_near = 0.0
+        if hasattr(result, 'risk_levels') and result.risk_levels:
+            sl = float(getattr(result.risk_levels, 'stop_loss', 0) or 0)
+            tp1 = float(getattr(result.risk_levels, 'take_profit_1', 0) or 0)
+            tp2 = float(getattr(result.risk_levels, 'take_profit_2', 0) or 0)
+            tp_near = float(getattr(result.risk_levels, 'take_profit_near', 0) or 0)
+
+        # If no risk levels computed yet, estimate simple SL/TP from ATR or percentage
+        if sl <= 0:
+            # Fallback: 1.5% SL, 1% TP1, 3% TP2
+            if side == 'LONG':
+                sl = entry_price * 0.985
+                tp_near = entry_price * 1.005
+                tp1 = entry_price * 1.01
+                tp2 = entry_price * 1.03
+            else:
+                sl = entry_price * 1.015
+                tp_near = entry_price * 0.995
+                tp1 = entry_price * 0.99
+                tp2 = entry_price * 0.97
+
+        storage.save_rejected_signal(
+            symbol=cooldown_symbol,
+            side=side,
+            entry_price=entry_price,
+            stop_loss=sl,
+            take_profit_1=tp1,
+            take_profit_2=tp2,
+            take_profit_near=tp_near,
+            score=float(getattr(result, 'total_score', 0)),
+            threshold=float(getattr(result, 'threshold', 0)),
+            rejection_reason=rejection_reason,
+            rejection_source=rejection_source,
+            market_regime=str(getattr(result, 'market_regime', '') or ''),
+            tracking_hours=24,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to save rejected signal shadow: {e}")
+
+
+def check_rejected_outcomes(
+    storage: SignalStorage,
+    binance_exchange,
+    kucoin_exchange,
+    config: Config,
+) -> None:
+    """
+    Check all shadow-tracked rejected signals against current prices.
+    Determines if the rejection decision was correct (trade would have lost)
+    or a missed opportunity (trade would have won).
+    """
+    def _sf(value, default=0.0):
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    # First expire old ones
+    storage.expire_old_rejected_signals()
+
+    tracked = storage.get_open_rejected_signals()
+    if not tracked:
+        return
+
+    for rej in tracked:
+        symbol_raw = str(rej['symbol']).split('_')[0]
+        try:
+            side = str(rej['side']).upper()
+            primary_is_mt5 = _is_mt5_source(binance_exchange)
+
+            if _is_mt5_only_requested(config) and 'VAI' in symbol_raw:
+                continue
+
+            if is_yahoo_symbol(symbol_raw) and not primary_is_mt5:
+                from bot.yahoo_data import get_yahoo_price
+                last = get_yahoo_price(symbol_raw)
+                ticker = {'last': last, 'bid': last, 'ask': last}
+            elif 'VAI' in symbol_raw:
+                ticker = fetch_ticker(kucoin_exchange, symbol_raw) if kucoin_exchange else None
+                ticker = ticker or {}
+            else:
+                ticker = fetch_ticker(binance_exchange, symbol_raw)
+                ticker = ticker or {}
+
+            price = _sf(ticker.get('last'))
+            if price <= 0:
+                continue
+
+            entry = _sf(rej['entry_price'])
+            sl = _sf(rej['stop_loss'])
+            tp1 = _sf(rej['take_profit_1'])
+            tp2 = _sf(rej['take_profit_2'])
+            tp_near = _sf(rej.get('take_profit_near'))
+
+            if entry <= 0:
+                continue
+
+            hit_outcome = None
+            pnl_pct = 0.0
+            would_have_won = False
+
+            if side == 'LONG':
+                # Check TP2 first (best case)
+                if tp2 and price >= tp2:
+                    hit_outcome = 'SHADOW_TP2'
+                    pnl_pct = (tp2 - entry) / entry * 100
+                    would_have_won = True
+                elif tp1 and price >= tp1:
+                    hit_outcome = 'SHADOW_TP1'
+                    pnl_pct = (tp1 - entry) / entry * 100
+                    would_have_won = True
+                elif tp_near and price >= tp_near:
+                    hit_outcome = 'SHADOW_TP_NEAR'
+                    pnl_pct = (tp_near - entry) / entry * 100
+                    would_have_won = True
+                elif sl and price <= sl:
+                    hit_outcome = 'SHADOW_SL'
+                    pnl_pct = (sl - entry) / entry * 100
+                    would_have_won = False
+            else:  # SHORT
+                if tp2 and price <= tp2:
+                    hit_outcome = 'SHADOW_TP2'
+                    pnl_pct = (entry - tp2) / entry * 100
+                    would_have_won = True
+                elif tp1 and price <= tp1:
+                    hit_outcome = 'SHADOW_TP1'
+                    pnl_pct = (entry - tp1) / entry * 100
+                    would_have_won = True
+                elif tp_near and price <= tp_near:
+                    hit_outcome = 'SHADOW_TP_NEAR'
+                    pnl_pct = (entry - tp_near) / entry * 100
+                    would_have_won = True
+                elif sl and price >= sl:
+                    hit_outcome = 'SHADOW_SL'
+                    pnl_pct = (entry - sl) / entry * 100
+                    would_have_won = False
+
+            if hit_outcome:
+                storage.update_rejected_signal_outcome(
+                    rejected_id=int(rej['id']),
+                    outcome=hit_outcome,
+                    close_price=price,
+                    pnl_pct=pnl_pct,
+                    would_have_won=would_have_won,
+                )
+                verdict = "فرصة ضائعة ❌" if would_have_won else "قرار صحيح ✅"
+                logger.info(
+                    f"Shadow tracking {symbol_raw}: {hit_outcome} pnl={pnl_pct:+.2f}% → {verdict}"
+                )
+
+        except Exception as e:
+            logger.debug(f"Rejected outcome check error for {rej.get('symbol', '?')}: {e}")
+
+
+def send_rejected_signals_report(
+    storage: SignalStorage,
+    notifier: TelegramNotifier,
+) -> None:
+    """
+    Send a daily report evaluating the quality of rejection decisions.
+    Shows how many rejected trades would have won vs lost.
+    """
+    global _last_rejected_report
+
+    now = datetime.now(timezone.utc)
+    if _last_rejected_report and (now - _last_rejected_report) < timedelta(hours=24):
+        return
+
+    try:
+        stats_7d = storage.get_rejected_signal_stats(days=7)
+        stats_24h = storage.get_rejected_signal_stats(days=1)
+
+        if stats_7d['total_closed'] == 0 and stats_24h['total_rejected'] == 0:
+            return
+
+        accuracy_emoji = "🟢" if stats_7d['accuracy_pct'] >= 50 else "🔴"
+
+        msg = (
+            f"🔍 <b>تقرير تقييم قرارات الرفض</b>\n\n"
+            f"<b>آخر 24 ساعة:</b>\n"
+            f"  📊 صفقات مرفوضة تتبعناها: {stats_24h['total_rejected']}\n"
+            f"  ✅ قرار صحيح (كانت ستخسر): {stats_24h['correct_rejections']}\n"
+            f"  ❌ فرصة ضائعة (كانت ستربح): {stats_24h['missed_opportunities']}\n"
+            f"  ⏳ لا زالت تحت التتبع: {stats_24h['still_tracking']}\n\n"
+            f"<b>آخر 7 أيام:</b>\n"
+            f"  📊 إجمالي المرفوضات: {stats_7d['total_rejected']}\n"
+            f"  ✅ رفض صحيح: {stats_7d['correct_rejections']}\n"
+            f"  ❌ فرص ضائعة: {stats_7d['missed_opportunities']}\n"
+            f"  {accuracy_emoji} دقة الرفض: <b>{stats_7d['accuracy_pct']:.1f}%</b>\n"
+        )
+
+        if stats_7d['avg_missed_pnl'] > 0:
+            msg += f"  💰 متوسط ربح الفرص الضائعة: <b>{stats_7d['avg_missed_pnl']:+.2f}%</b>\n"
+        if stats_7d['avg_saved_loss'] < 0:
+            msg += f"  🛡️ متوسط خسارة تم تجنبها: <b>{stats_7d['avg_saved_loss']:+.2f}%</b>\n"
+
+        # Per-source breakdown
+        if stats_7d.get('by_source'):
+            msg += "\n<b>تفصيل حسب الفلتر:</b>\n"
+            for src, src_stats in stats_7d['by_source'].items():
+                src_accuracy = (
+                    (src_stats['correct'] / src_stats['total'] * 100)
+                    if src_stats['total'] > 0
+                    else 0
+                )
+                msg += (
+                    f"  • {src}: {src_stats['total']} "
+                    f"(✅{src_stats['correct']} ❌{src_stats['missed']}) "
+                    f"دقة {src_accuracy:.0f}%\n"
+                )
+
+        if notifier.enabled:
+            notifier._send_telegram(msg)
+        _last_rejected_report = now
+        logger.info(
+            f"Rejected signals report sent: accuracy={stats_7d['accuracy_pct']:.1f}% "
+            f"(correct={stats_7d['correct_rejections']}, missed={stats_7d['missed_opportunities']})"
+        )
+
+    except Exception as e:
+        logger.debug(f"Rejected signals report failed: {e}")
+
+
 def scan_symbol(
     symbol: str,
     exchange,
@@ -2417,12 +2664,32 @@ def scan_symbol(
                         f"Learning filter blocked {symbol} [{signal_mode}] {result.side} "
                         f"(score={result.total_score:.2f}/{result.threshold:.2f})"
                     )
+                    _save_rejected_signal_shadow(
+                        storage=storage,
+                        symbol=symbol,
+                        cooldown_symbol=cooldown_symbol,
+                        side=result.side,
+                        ticker=ticker,
+                        result=result,
+                        rejection_reason=f"learning_filter_blocked: allow=False wr={learning.expected_winrate*100:.1f}%",
+                        rejection_source="learning_filter",
+                    )
                     return ''
 
                 if result.total_score < result.threshold and learning.sample_size >= min_local_for_hard_gate:
                     logger.info(
                         f"Learning-adjusted score below threshold for {symbol} [{signal_mode}] "
                         f"({result.total_score:.2f}/{result.threshold:.2f})"
+                    )
+                    _save_rejected_signal_shadow(
+                        storage=storage,
+                        symbol=symbol,
+                        cooldown_symbol=cooldown_symbol,
+                        side=result.side,
+                        ticker=ticker,
+                        result=result,
+                        rejection_reason=f"learning_score_below_threshold: {result.total_score:.2f}<{result.threshold:.2f}",
+                        rejection_source="learning_score_gate",
                     )
                     return ''
 
@@ -2436,6 +2703,16 @@ def scan_symbol(
                     logger.info(
                         f"Learning expectancy gate blocked {symbol} [{signal_mode}] {result.side}: "
                         f"{float(getattr(learning, 'expected_pnl_pct', 0.0)):+.2f}% < {min_hybrid_expectancy:+.2f}%"
+                    )
+                    _save_rejected_signal_shadow(
+                        storage=storage,
+                        symbol=symbol,
+                        cooldown_symbol=cooldown_symbol,
+                        side=result.side,
+                        ticker=ticker,
+                        result=result,
+                        rejection_reason=f"expectancy_gate: {float(getattr(learning, 'expected_pnl_pct', 0.0)):+.2f}%<{min_hybrid_expectancy:+.2f}%",
+                        rejection_source="expectancy_gate",
                     )
                     return ''
 
@@ -2886,10 +3163,15 @@ def run_scan_loop(config: Config) -> None:
         # ── Phase 5: Check all open outcomes against current prices ──────
         check_open_outcomes(storage, notifier, binance_exchange, kucoin_exchange, config)
         
-        # ── Phase 5: Send daily WinRate report ───────────────────────────
+        # ── Phase 5b: Check shadow-tracked rejected signals ──────────────
+        check_rejected_outcomes(storage, binance_exchange, kucoin_exchange, config)
+        
+        # ── Phase 6: Send daily WinRate report ───────────────────────────
         send_winrate_report(storage, notifier)
         # Shadow-only health monitor (no effect on signal dispatch)
         send_walkforward_shadow_report(storage, notifier)
+        # Rejected signals quality report
+        send_rejected_signals_report(storage, notifier)
         
         # ── BTC Market Pulse: fetch once per scan, used for all altcoins ──
         _btc_pulse_trend = _get_btc_pulse_trend(binance_exchange, config)

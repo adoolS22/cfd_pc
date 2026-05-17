@@ -159,6 +159,42 @@ class SignalStorage:
                 ON pending_entries(symbol)
             """)
 
+            # Rejected signals shadow tracking table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS rejected_signals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    stop_loss REAL,
+                    take_profit_1 REAL,
+                    take_profit_2 REAL,
+                    take_profit_near REAL,
+                    score REAL,
+                    threshold REAL,
+                    rejection_reason TEXT,
+                    rejection_source TEXT DEFAULT 'learning_filter',
+                    market_regime TEXT,
+                    outcome TEXT DEFAULT 'TRACKING',
+                    close_price REAL,
+                    pnl_pct REAL,
+                    would_have_won INTEGER,
+                    closed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_rejected_signals_symbol_outcome
+                ON rejected_signals(symbol, outcome)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_rejected_signals_created
+                ON rejected_signals(created_at DESC)
+            """)
+
             # Backward-compatible migrations for existing DB files.
             self._ensure_column(cursor, "signals", "take_profit_near", "REAL")
             self._ensure_column(cursor, "signal_outcomes", "take_profit_near", "REAL")
@@ -1499,3 +1535,259 @@ class SignalStorage:
         stats['avg_pnl'] = (total_pnl / closed) if closed > 0 else 0.0
         
         return stats
+
+    # ── Rejected Signals Shadow Tracking ─────────────────────────────────
+
+    def save_rejected_signal(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        stop_loss: float,
+        take_profit_1: float,
+        take_profit_2: float,
+        take_profit_near: float = 0.0,
+        score: float,
+        threshold: float,
+        rejection_reason: str,
+        rejection_source: str = "learning_filter",
+        market_regime: str = "",
+        tracking_hours: int = 24,
+    ) -> int:
+        """
+        Save a rejected signal for shadow tracking.
+        The bot will monitor what would have happened if it entered.
+
+        Args:
+            symbol: Trading symbol
+            side: 'LONG' or 'SHORT'
+            entry_price: Price at rejection time
+            stop_loss: Would-be stop loss
+            take_profit_1: Would-be TP1
+            take_profit_2: Would-be TP2
+            take_profit_near: Would-be quick TP
+            score: Signal score at rejection
+            threshold: Threshold at rejection
+            rejection_reason: Why was it rejected
+            rejection_source: Which filter rejected it
+            market_regime: Market regime at rejection
+            tracking_hours: How long to track (default 24h)
+
+        Returns:
+            ID of inserted row
+        """
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(hours=tracking_hours)
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO rejected_signals
+                (symbol, side, entry_price, stop_loss, take_profit_1,
+                 take_profit_2, take_profit_near, score, threshold,
+                 rejection_reason, rejection_source, market_regime,
+                 outcome, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'TRACKING', ?, ?)
+                """,
+                (
+                    str(symbol),
+                    str(side).upper(),
+                    float(entry_price),
+                    float(stop_loss),
+                    float(take_profit_1),
+                    float(take_profit_2),
+                    float(take_profit_near),
+                    float(score),
+                    float(threshold),
+                    str(rejection_reason),
+                    str(rejection_source),
+                    str(market_regime or ""),
+                    now.isoformat(),
+                    expires.isoformat(),
+                ),
+            )
+            conn.commit()
+            row_id = int(cursor.lastrowid)
+
+        logger.debug(
+            f"Shadow-tracked rejected signal: {symbol} {side} "
+            f"score={score:.1f} reason={rejection_reason}"
+        )
+        return row_id
+
+    def get_open_rejected_signals(self) -> List[Dict[str, Any]]:
+        """
+        Get all rejected signals still being tracked (not yet closed or expired).
+
+        Returns:
+            List of dicts with rejected signal data
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            rows = cursor.execute(
+                """
+                SELECT *
+                FROM rejected_signals
+                WHERE outcome = 'TRACKING'
+                  AND expires_at > ?
+                """,
+                (now,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_rejected_signal_outcome(
+        self,
+        rejected_id: int,
+        outcome: str,
+        close_price: float,
+        pnl_pct: float,
+        would_have_won: bool,
+    ) -> None:
+        """
+        Update a rejected signal with its shadow outcome.
+
+        Args:
+            rejected_id: ID in rejected_signals table
+            outcome: 'SHADOW_TP1', 'SHADOW_TP2', 'SHADOW_TP_NEAR', 'SHADOW_SL', 'SHADOW_EXPIRED'
+            close_price: Price when outcome was detected
+            pnl_pct: Would-be profit/loss percentage
+            would_have_won: True if the trade would have been profitable
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE rejected_signals
+                SET outcome = ?, close_price = ?, pnl_pct = ?,
+                    would_have_won = ?, closed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    str(outcome),
+                    float(close_price),
+                    float(pnl_pct),
+                    1 if would_have_won else 0,
+                    now,
+                    int(rejected_id),
+                ),
+            )
+            conn.commit()
+        logger.info(
+            f"Rejected signal shadow outcome: ID={rejected_id} → {outcome} "
+            f"pnl={pnl_pct:+.2f}% won={would_have_won}"
+        )
+
+    def expire_old_rejected_signals(self) -> int:
+        """
+        Close expired rejected signals that are still in TRACKING state.
+
+        Returns:
+            Number of expired rows
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # Get entries to expire so we can compute their PnL
+            cursor.execute(
+                """
+                UPDATE rejected_signals
+                SET outcome = 'SHADOW_EXPIRED', closed_at = ?
+                WHERE outcome = 'TRACKING' AND expires_at <= ?
+                """,
+                (now, now),
+            )
+            expired = int(cursor.rowcount or 0)
+            conn.commit()
+        if expired > 0:
+            logger.info(f"Expired {expired} shadow-tracked rejected signals")
+        return expired
+
+    def get_rejected_signal_stats(self, days: int = 7) -> Dict[str, Any]:
+        """
+        Get statistics about rejected signals and whether rejection was correct.
+
+        Returns dict with:
+            total_rejected: Total rejected signals tracked
+            total_closed: Signals where outcome is known
+            would_have_won: Count that would have been profitable
+            would_have_lost: Count that would have lost
+            correct_rejections: Rejections where the trade would have lost (good call)
+            missed_opportunities: Rejections where the trade would have won (bad call)
+            accuracy_pct: % of correct rejection decisions
+            avg_missed_pnl: Average PnL of missed opportunities
+            avg_saved_loss: Average loss saved by correct rejections
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))).isoformat()
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+
+            # Total tracked
+            cursor.execute(
+                "SELECT COUNT(*) FROM rejected_signals WHERE created_at >= ?",
+                (cutoff,),
+            )
+            total_rejected = cursor.fetchone()[0]
+
+            # Closed outcomes
+            cursor.execute(
+                """
+                SELECT outcome, pnl_pct, would_have_won, rejection_source
+                FROM rejected_signals
+                WHERE created_at >= ? AND outcome != 'TRACKING'
+                """,
+                (cutoff,),
+            )
+            rows = cursor.fetchall()
+
+        total_closed = len(rows)
+        would_have_won = sum(1 for r in rows if r[2] == 1)
+        would_have_lost = sum(1 for r in rows if r[2] == 0)
+
+        # Correct rejection = trade would have lost
+        correct_rejections = would_have_lost
+        missed_opportunities = would_have_won
+
+        accuracy_pct = (
+            (correct_rejections / total_closed * 100.0)
+            if total_closed > 0
+            else 0.0
+        )
+
+        # Average PnL for missed winners and saved losers
+        missed_pnls = [float(r[1] or 0) for r in rows if r[2] == 1 and r[1] is not None]
+        saved_losses = [float(r[1] or 0) for r in rows if r[2] == 0 and r[1] is not None]
+
+        avg_missed_pnl = (sum(missed_pnls) / len(missed_pnls)) if missed_pnls else 0.0
+        avg_saved_loss = (sum(saved_losses) / len(saved_losses)) if saved_losses else 0.0
+
+        # Per-source breakdown
+        source_stats: Dict[str, Dict[str, int]] = {}
+        for r in rows:
+            src = str(r[3] or "unknown")
+            if src not in source_stats:
+                source_stats[src] = {"total": 0, "correct": 0, "missed": 0}
+            source_stats[src]["total"] += 1
+            if r[2] == 1:
+                source_stats[src]["missed"] += 1
+            else:
+                source_stats[src]["correct"] += 1
+
+        return {
+            "total_rejected": total_rejected,
+            "total_closed": total_closed,
+            "still_tracking": total_rejected - total_closed,
+            "would_have_won": would_have_won,
+            "would_have_lost": would_have_lost,
+            "correct_rejections": correct_rejections,
+            "missed_opportunities": missed_opportunities,
+            "accuracy_pct": accuracy_pct,
+            "avg_missed_pnl": avg_missed_pnl,
+            "avg_saved_loss": avg_saved_loss,
+            "by_source": source_stats,
+        }
