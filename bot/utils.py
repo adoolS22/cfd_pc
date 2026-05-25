@@ -15,6 +15,14 @@ import sys
 
 
 @dataclass
+class TimeStopConfig:
+    """Time-based stop loss configuration."""
+    enabled: bool
+    max_hold_minutes: int
+    min_progress_to_continue_pct: float
+    progress_check_at_pct: float
+
+@dataclass
 class RiskConfig:
     """Risk management configuration."""
     buffer_pct: float
@@ -37,6 +45,7 @@ class RiskConfig:
     max_sl_pct_macro: float
     timeframe_quick_tp_scale: Dict[str, float]
     timeframe_tp2_rr_scale: Dict[str, float]
+    time_stop: TimeStopConfig
 
 
 @dataclass
@@ -248,6 +257,12 @@ class QualityFilterConfig:
 
 
 @dataclass
+class TradeFiltersConfig:
+    """Spread and specific trade filters."""
+    min_tp1_to_spread_ratio: float
+    min_quick_tp_to_spread_ratio: float
+
+@dataclass
 class OnChainConfig:
     """On-chain analysis configuration."""
     enabled: bool
@@ -287,6 +302,11 @@ class PortfolioRiskConfig:
     max_open_positions: int
     max_consecutive_losses: int
     loss_streak_cooldown_minutes: int
+    weekly_loss_limit_pct: float
+    max_drawdown_from_peak_pct: float
+    pause_on_drawdown_breach: bool
+    resume_after_consecutive_wins: int
+    state_file: str
 
 
 @dataclass
@@ -325,6 +345,7 @@ class Config:
     time_analysis: TimeAnalysisConfig
     learning: LearningConfig
     quality_filter: QualityFilterConfig
+    trade_filters: TradeFiltersConfig
     onchain: OnChainConfig
     llm_postmortem: LLMPostmortemConfig
     portfolio_risk: PortfolioRiskConfig
@@ -407,6 +428,12 @@ def load_config(config_path: str = "config.yaml") -> Config:
         max_sl_pct_macro=float(risk_data.get('max_sl_pct_macro', 2.2)),
         timeframe_quick_tp_scale=dict(risk_data.get('timeframe_quick_tp_scale', {}) or {}),
         timeframe_tp2_rr_scale=dict(risk_data.get('timeframe_tp2_rr_scale', {}) or {}),
+        time_stop=TimeStopConfig(
+            enabled=bool(risk_data.get('time_stop', {}).get('enabled', True)),
+            max_hold_minutes=int(risk_data.get('time_stop', {}).get('max_hold_minutes', 480)),
+            min_progress_to_continue_pct=float(risk_data.get('time_stop', {}).get('min_progress_to_continue_pct', 0.30)),
+            progress_check_at_pct=float(risk_data.get('time_stop', {}).get('progress_check_at_pct', 0.50)),
+        )
     )
 
     regime_data = data.get('regime', {})
@@ -606,6 +633,12 @@ def load_config(config_path: str = "config.yaml") -> Config:
         correlation_window_minutes=max(5, int(quality_data.get('correlation_window_minutes', 30))),
     )
 
+    trade_filters_data = data.get('trade_filters', {})
+    trade_filters_config = TradeFiltersConfig(
+        min_tp1_to_spread_ratio=float(trade_filters_data.get('min_tp1_to_spread_ratio', 3.0)),
+        min_quick_tp_to_spread_ratio=float(trade_filters_data.get('min_quick_tp_to_spread_ratio', 4.0)),
+    )
+
     onchain_data = data.get('onchain', {})
     onchain_config = OnChainConfig(
         enabled=bool(onchain_data.get('enabled', False)),
@@ -643,6 +676,11 @@ def load_config(config_path: str = "config.yaml") -> Config:
         max_open_positions=int(portfolio_risk_data.get('max_open_positions', 3)),
         max_consecutive_losses=int(portfolio_risk_data.get('max_consecutive_losses', 4)),
         loss_streak_cooldown_minutes=int(portfolio_risk_data.get('loss_streak_cooldown_minutes', 90)),
+        weekly_loss_limit_pct=float(portfolio_risk_data.get('weekly_loss_limit_pct', -7.0)),
+        max_drawdown_from_peak_pct=float(portfolio_risk_data.get('max_drawdown_from_peak_pct', -10.0)),
+        pause_on_drawdown_breach=bool(portfolio_risk_data.get('pause_on_drawdown_breach', True)),
+        resume_after_consecutive_wins=int(portfolio_risk_data.get('resume_after_consecutive_wins', 2)),
+        state_file=str(portfolio_risk_data.get('state_file', 'equity_state.json')).strip(),
     )
 
     quality_first_data = data.get('quality_first', {})
@@ -733,6 +771,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
         time_analysis=time_config,
         learning=learning_config,
         quality_filter=quality_filter_config,
+        trade_filters=trade_filters_config,
         onchain=onchain_config,
         llm_postmortem=llm_postmortem_config,
         portfolio_risk=portfolio_risk_config,

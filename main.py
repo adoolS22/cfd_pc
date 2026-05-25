@@ -32,6 +32,7 @@ from bot.quality_first import evaluate_quality_first
 from bot.llm_postmortem import evaluate_loss_postmortem
 from bot.yahoo_data import is_yahoo_symbol, fetch_yahoo_ohlcv, get_yahoo_price
 from bot.ml_engine import MLEngine
+from bot.equity_protection import EquityProtection
 from typing import Any
 
 
@@ -1420,6 +1421,7 @@ def check_open_outcomes(
     binance_exchange,
     kucoin_exchange,
     config: Config,
+    equity_protection: Optional['EquityProtection'] = None,
 ) -> None:
     """
     Check all OPEN signal outcomes against current prices.
@@ -1528,16 +1530,49 @@ def check_open_outcomes(
             _pe_cfg       = getattr(config, 'partial_exit', None)
             _remainder    = float(getattr(_pe_cfg, 'remainder_pct', 0.40)) if _pe_cfg else 0.40
 
-            if side == 'LONG' and tp2 and price >= tp2:
-                hit_outcome = 'TP2_HIT'
-                raw_pnl = (tp2 - entry) / entry * 100
-                # If partial exit was done: final PnL = locked 60% + 40% of TP2 move
-                pnl_pct = (_tp1_locked + raw_pnl * _remainder) if _partial_done else raw_pnl
-            elif side == 'SHORT' and tp2 and price <= tp2:
-                hit_outcome = 'TP2_HIT'
-                raw_pnl = (entry - tp2) / entry * 100
-                pnl_pct = (_tp1_locked + raw_pnl * _remainder) if _partial_done else raw_pnl
-            else:
+            closed_reason = None
+            time_stop = getattr(config.risk, 'time_stop', None)
+            ts_enabled = bool(getattr(time_stop, 'enabled', False)) if time_stop else False
+            ts_max_hold = int(getattr(time_stop, 'max_hold_minutes', 480)) if time_stop else 480
+            ts_min_prog = float(getattr(time_stop, 'min_progress_to_continue_pct', 0.30)) if time_stop else 0.30
+            ts_check_pct = float(getattr(time_stop, 'progress_check_at_pct', 0.50)) if time_stop else 0.50
+
+            if hit_outcome is None and ts_enabled and outcome.get('signal_timestamp'):
+                try:
+                    sig_ts = datetime.fromisoformat(outcome['signal_timestamp'])
+                    if sig_ts.tzinfo is None:
+                        sig_ts = sig_ts.replace(tzinfo=timezone.utc)
+                    age_minutes = (datetime.now(timezone.utc) - sig_ts).total_seconds() / 60.0
+                    
+                    if age_minutes >= ts_max_hold:
+                        hit_outcome = 'EXITED'
+                        closed_reason = "time_stop_max"
+                    elif age_minutes >= (ts_max_hold * ts_check_pct):
+                        tp1_dist_total = tp1 - entry if side == 'LONG' else entry - tp1
+                        if tp1_dist_total != 0:
+                            prog = (price - entry) / tp1_dist_total if side == 'LONG' else (entry - price) / tp1_dist_total
+                            if prog < ts_min_prog:
+                                hit_outcome = 'EXITED'
+                                closed_reason = f"time_stop_progress ({prog*100:.1f}% < {ts_min_prog*100:.1f}%)"
+                    
+                    if hit_outcome == 'EXITED':
+                        raw_pnl = (price - entry) / entry * 100 if side == 'LONG' else (entry - price) / entry * 100
+                        pnl_pct = (_tp1_locked + raw_pnl * _remainder) if _partial_done else raw_pnl
+                except Exception as e:
+                    logger.debug(f"Time stop check failed for {symbol_raw}: {e}")
+
+            if hit_outcome is None:
+                if side == 'LONG' and tp2 and price >= tp2:
+                    hit_outcome = 'TP2_HIT'
+                    raw_pnl = (tp2 - entry) / entry * 100
+                    # If partial exit was done: final PnL = locked 60% + 40% of TP2 move
+                    pnl_pct = (_tp1_locked + raw_pnl * _remainder) if _partial_done else raw_pnl
+                elif side == 'SHORT' and tp2 and price <= tp2:
+                    hit_outcome = 'TP2_HIT'
+                    raw_pnl = (entry - tp2) / entry * 100
+                    pnl_pct = (_tp1_locked + raw_pnl * _remainder) if _partial_done else raw_pnl
+            
+            if hit_outcome is None:
                 # First touch of TP1: arm protection and keep position open if configured.
                 tp1_hit_now = (side == 'LONG' and tp1 and price >= tp1) or (side == 'SHORT' and tp1 and price <= tp1)
                 if (not tp1_touched) and tp1_hit_now and manage_after_tp1:
@@ -1642,7 +1677,9 @@ def check_open_outcomes(
                 if (not tp1_touched) and tp1_hit_now and (not manage_after_tp1):
                     hit_outcome = 'TP1_HIT'
                     pnl_pct = ((tp1 - entry) / entry * 100) if side == 'LONG' else ((entry - tp1) / entry * 100)
-                else:
+            
+            if hit_outcome is None:
+                if True:
                     # Update trailing state while still OPEN.
                     effective_stop = sl
                     if tp1_touched and be_armed:
@@ -1741,7 +1778,13 @@ def check_open_outcomes(
                             pnl_pct = (_tp1_locked + raw_pnl * _remainder) if _partial_done else raw_pnl
             
             if hit_outcome:
-                storage.update_signal_outcome(outcome['id'], hit_outcome, price, pnl_pct)
+                storage.update_signal_outcome(int(outcome['id']), hit_outcome, price, pnl_pct, closed_reason=closed_reason)
+                
+                if equity_protection:
+                    if hit_outcome in ('TP_NEAR_HIT', 'TP1_HIT', 'TP2_HIT') or pnl_pct > 0:
+                        equity_protection.mark_consecutive_wins(True)
+                    elif hit_outcome == 'SL_HIT' or pnl_pct < 0:
+                        equity_protection.mark_consecutive_wins(False)
                 
                 emoji_map = {
                     'TP_NEAR_HIT': '⚡✅',
@@ -1959,6 +2002,7 @@ def check_rejected_outcomes(
     binance_exchange,
     kucoin_exchange,
     config: Config,
+    equity_protection: Optional['EquityProtection'] = None,
 ) -> None:
     """
     Check all shadow-tracked rejected signals against current prices.
@@ -2059,6 +2103,17 @@ def check_rejected_outcomes(
                     pnl_pct=pnl_pct,
                     would_have_won=would_have_won,
                 )
+                
+                if equity_protection and str(rej.get('rejection_source', '')) == 'equity_protection':
+                    should_resume = equity_protection.mark_consecutive_wins(would_have_won)
+                    if should_resume:
+                        equity_protection.reset_after_breach()
+                        msg = "🟢 <b>Equity Protection:</b> Resumed trading due to consecutive shadow wins!"
+                        logger.info(msg)
+                        if getattr(config, 'notifier', None):
+                            # The notifier instance is not passed to check_rejected_outcomes, but we can print it
+                            pass
+                
                 verdict = "فرصة ضائعة ❌" if would_have_won else "قرار صحيح ✅"
                 logger.info(
                     f"Shadow tracking {symbol_raw}: {hit_outcome} pnl={pnl_pct:+.2f}% → {verdict}"
@@ -2842,6 +2897,21 @@ def scan_symbol(
                     return ''
             # --------------------------------
 
+            # ── Equity Protection Gate ──
+            if config.portfolio_risk and getattr(config.portfolio_risk, 'equity_paused', False):
+                logger.info(f"Equity Protection paused {symbol} [{signal_mode}] {result.side}. Creating shadow trade.")
+                _save_rejected_signal_shadow(
+                    storage=storage,
+                    symbol=symbol,
+                    cooldown_symbol=cooldown_symbol,
+                    side=result.side,
+                    ticker=ticker,
+                    result=result,
+                    rejection_reason="equity_protection_paused",
+                    rejection_source="equity_protection",
+                )
+                return ''
+
             # Send signal
             try:
                 import os
@@ -3091,6 +3161,8 @@ def run_scan_loop(config: Config) -> None:
         ml_engine = MLEngine(storage.db_path)
         ml_engine.train()
     
+    equity_protection = EquityProtection(config.portfolio_risk)
+    
     notifier = TelegramNotifier(config)
     _ensure_requested_exchange_source(config, binance_exchange)
     active_exchange_id = str(getattr(binance_exchange, "id", "") or "unknown")
@@ -3161,10 +3233,10 @@ def run_scan_loop(config: Config) -> None:
             logger.warning(f"Session close check failed: {_sce}")
 
         # ── Phase 5: Check all open outcomes against current prices ──────
-        check_open_outcomes(storage, notifier, binance_exchange, kucoin_exchange, config)
+        check_open_outcomes(storage, notifier, binance_exchange, kucoin_exchange, config, equity_protection=equity_protection)
         
         # ── Phase 5b: Check shadow-tracked rejected signals ──────────────
-        check_rejected_outcomes(storage, binance_exchange, kucoin_exchange, config)
+        check_rejected_outcomes(storage, binance_exchange, kucoin_exchange, config, equity_protection=equity_protection)
         
         # ── Phase 6: Send daily WinRate report ───────────────────────────
         send_winrate_report(storage, notifier)
@@ -3190,6 +3262,16 @@ def run_scan_loop(config: Config) -> None:
         for symbol in config.symbols:
             if shutdown_requested or is_scan_paused():
                 break
+
+            # ── Equity Protection Check ──
+            is_safe, ep_reason = equity_protection.check_protection(storage)
+            if config.portfolio_risk:
+                config.portfolio_risk.equity_paused = not is_safe
+                
+            if not is_safe:
+                if not paused_log_emitted:
+                    logger.warning(f"Equity Protection: Trading paused due to drawdown/loss limits: {ep_reason}. Shadow trading enabled.")
+                    paused_log_emitted = True
 
             sym_asset_class = _infer_asset_class_for_symbol(symbol)
 

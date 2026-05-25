@@ -198,6 +198,7 @@ class SignalStorage:
             # Backward-compatible migrations for existing DB files.
             self._ensure_column(cursor, "signals", "take_profit_near", "REAL")
             self._ensure_column(cursor, "signal_outcomes", "take_profit_near", "REAL")
+            self._ensure_column(cursor, "signal_outcomes", "closed_reason", "TEXT")
             self._ensure_column(cursor, "signal_outcomes", "tp1_touched", "INTEGER DEFAULT 0")
             self._ensure_column(cursor, "signal_outcomes", "break_even_armed", "INTEGER DEFAULT 0")
             self._ensure_column(cursor, "signal_outcomes", "trail_stop", "REAL")
@@ -1248,6 +1249,7 @@ class SignalStorage:
         close_price: Optional[float] = None,
         outcome: str = 'EXITED',
         spread_cost_pct: Optional[float] = None,
+        closed_reason: Optional[str] = None,
     ) -> int:
         """
         Close all OPEN outcomes for a symbol (e.g., manual EXIT signal).
@@ -1258,6 +1260,8 @@ class SignalStorage:
             close_price: Optional close price to store
             outcome: Outcome label for closed records
             spread_cost_pct: Optional spread cost (%) to subtract from PnL
+            closed_reason: Optional reason for closing
+
 
         Returns:
             Number of rows updated
@@ -1286,16 +1290,16 @@ class SignalStorage:
                         pnl_pct -= spread_cost
                     cursor.execute("""
                         UPDATE signal_outcomes
-                        SET outcome = ?, close_price = ?, pnl_pct = ?, closed_at = ?
+                        SET outcome = ?, close_price = ?, pnl_pct = ?, closed_at = ?, closed_reason = ?
                         WHERE id = ? AND outcome = 'OPEN'
-                    """, (outcome, close_price, pnl_pct, now, row_id))
+                    """, (outcome, close_price, pnl_pct, now, closed_reason, row_id))
                 updated = len(open_rows)
             else:
                 cursor.execute("""
                     UPDATE signal_outcomes
-                    SET outcome = ?, closed_at = ?
+                    SET outcome = ?, closed_at = ?, closed_reason = ?
                     WHERE symbol = ? AND outcome = 'OPEN'
-                """, (outcome, now, symbol))
+                """, (outcome, now, closed_reason, symbol))
                 updated = cursor.rowcount
 
             conn.commit()
@@ -1310,7 +1314,8 @@ class SignalStorage:
         outcome_id: int,
         outcome: str,
         close_price: float,
-        pnl_pct: float
+        pnl_pct: float,
+        closed_reason: Optional[str] = None
     ) -> None:
         """
         Update the outcome of a tracked signal (TP_NEAR_HIT, TP1_HIT, TP2_HIT, SL_HIT).
@@ -1320,15 +1325,16 @@ class SignalStorage:
             outcome: 'TP_NEAR_HIT', 'TP1_HIT', 'TP2_HIT', 'SL_HIT'
             close_price: Price when outcome was detected
             pnl_pct: Profit/loss percentage
+            closed_reason: Optional reason for the close
         """
         now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 UPDATE signal_outcomes
-                SET outcome = ?, close_price = ?, pnl_pct = ?, closed_at = ?
+                SET outcome = ?, close_price = ?, pnl_pct = ?, closed_at = ?, closed_reason = ?
                 WHERE id = ?
-            """, (outcome, close_price, pnl_pct, now, outcome_id))
+            """, (outcome, close_price, pnl_pct, now, closed_reason, outcome_id))
             conn.commit()
         logger.info(f"Outcome updated: ID={outcome_id} → {outcome} @ {close_price:.4f} ({pnl_pct:+.2f}%)")
 

@@ -1908,6 +1908,26 @@ def analyze_symbol(
             fvg_target=result.extra_data.get('fvg_target') if hasattr(result, 'extra_data') else None,
         )
 
+        # ── Spread-Aware Rejection Filter ──
+        if result.risk_levels and ticker.get('bid') and ticker.get('ask'):
+            spread = abs(float(ticker['ask']) - float(ticker['bid']))
+            tp1_dist = abs(result.risk_levels.take_profit_1 - result.risk_levels.entry)
+            tp_near_dist = abs(result.risk_levels.take_profit_near - result.risk_levels.entry) if result.risk_levels.take_profit_near else 0
+            
+            min_ratio = float(getattr(getattr(config, 'trade_filters', None), 'min_tp1_to_spread_ratio', 3.0))
+            min_quick_ratio = float(getattr(getattr(config, 'trade_filters', None), 'min_quick_tp_to_spread_ratio', 4.0))
+            
+            if spread > 0 and tp1_dist > 0 and (tp1_dist / spread) < min_ratio:
+                result.side = None
+                result.is_valid = False
+                result.blocked_reason = f"TP1/Spread ratio {tp1_dist/spread:.1f}x < {min_ratio}x"
+                logger.info(f"Spread Rejection {symbol} {potential_side}: {result.blocked_reason}")
+                return result
+            
+            if spread > 0 and tp_near_dist > 0 and (tp_near_dist / spread) < min_quick_ratio:
+                result.risk_levels.take_profit_near = 0.0
+                result.reasons.append(f"Quick TP disabled: ratio {tp_near_dist/spread:.1f}x < {min_quick_ratio}x")
+
         # ── Maximum Stop Distance Filter ──
         # Prevent oversized stops (especially on thin/volatile altcoins) from being traded live.
         if result.risk_levels and result.risk_levels.entry > 0:
