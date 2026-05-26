@@ -29,7 +29,9 @@ def run():
     print(f"Score: {result.total_score}")
     print("\nReasons:")
     for r in result.reasons:
-        print(f" - {r}")
+        # Avoid Windows CP1252 terminal printing crash
+        safe_reason = str(r).replace('✓', '[OK]').encode('ascii', errors='ignore').decode('ascii')
+        print(f" - {safe_reason}")
         
     if result.risk_levels:
         print("\nRisk Parameters:")

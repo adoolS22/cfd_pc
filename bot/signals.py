@@ -21,7 +21,9 @@ from .smc import (
     detect_unmitigated_fvgs, detect_order_blocks, detect_liquidity_sweeps,
     get_nearest_unmitigated_fvg, get_nearest_order_block,
     detect_structure_breaks, get_latest_structure_break, StructureBreak,
-    get_previous_day_liquidity, get_volume_profile_poc
+    get_previous_day_liquidity, get_volume_profile_poc,
+    detect_displacement, classify_sweep_vs_acceptance, Displacement,
+    get_dealing_range, detect_fvgs, detect_ifvgs,
 )
 from .gann import calculate_gann_angles, analyze_square9, GannAnalysis, Square9Analysis
 from .time_cycles import analyze_52_cycle, analyze_lunar, CycleAnalysis, LunarAnalysis
@@ -1038,6 +1040,484 @@ def calculate_timing_score(
 
 
 # =============================================================================
+# SMC Professional Workflow — 3-Phase Entry Logic
+# =============================================================================
+
+def determine_htf_bias(
+    df_htf: pd.DataFrame,
+    current_price: float,
+) -> Dict[str, Any]:
+    """
+    Phase 1: Higher Timeframe Bias (Daily / 4H / 1H).
+
+    Does NOT look for entries. Only determines:
+    - Overall direction (bullish / bearish / neutral) via swing structure
+    - Premium vs Discount zone (Dealing Range)
+    - Nearest BSL / SSL liquidity pools
+    - Whether current move is impulsive or corrective
+
+    المرحلة 1: الفريم العالي — الاتجاه والهدف
+    على اليومي و4 ساعات ما بدور على دخول. بدور على:
+    هل السوق bullish ولا bearish ولا range؟
+    هل السعر قريب من premium ولا discount؟
+    أقرب سيولة واضحة وين؟
+    """
+    result: Dict[str, Any] = {
+        "direction": "neutral",
+        "zone": "equilibrium",
+        "bsl_levels": [],
+        "ssl_levels": [],
+        "swing_trend": "neutral",
+        "is_impulsive": False,
+        "dealing_range": None,
+    }
+
+    if df_htf is None or df_htf.empty or len(df_htf) < 20:
+        return result
+
+    # ── Swing structure analysis ──
+    swing_highs = []
+    swing_lows = []
+    for i in range(2, len(df_htf) - 2):
+        h = df_htf['high'].iloc[i]
+        if (h > df_htf['high'].iloc[i - 1] and h > df_htf['high'].iloc[i - 2] and
+                h > df_htf['high'].iloc[i + 1] and h > df_htf['high'].iloc[i + 2]):
+            swing_highs.append((i, float(h)))
+        l = df_htf['low'].iloc[i]
+        if (l < df_htf['low'].iloc[i - 1] and l < df_htf['low'].iloc[i - 2] and
+                l < df_htf['low'].iloc[i + 1] and l < df_htf['low'].iloc[i + 2]):
+            swing_lows.append((i, float(l)))
+
+    if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+        hh = swing_highs[-1][1] > swing_highs[-2][1]
+        hl = swing_lows[-1][1] > swing_lows[-2][1]
+        lh = swing_highs[-1][1] < swing_highs[-2][1]
+        ll = swing_lows[-1][1] < swing_lows[-2][1]
+        if hh and hl:
+            result["swing_trend"] = "up"
+            result["direction"] = "bullish"
+        elif lh and ll:
+            result["swing_trend"] = "down"
+            result["direction"] = "bearish"
+    elif len(swing_highs) >= 1 and len(swing_lows) >= 1:
+        # Fallback: use EMA for bias when not enough swings
+        if 'ema_50' in df_htf.columns and 'ema_200' in df_htf.columns:
+            ema50 = float(df_htf['ema_50'].iloc[-1])
+            ema200 = float(df_htf['ema_200'].iloc[-1])
+            if not (pd.isna(ema50) or pd.isna(ema200)):
+                if ema50 > ema200 and current_price > ema200:
+                    result["direction"] = "bullish"
+                    result["swing_trend"] = "up"
+                elif ema50 < ema200 and current_price < ema200:
+                    result["direction"] = "bearish"
+                    result["swing_trend"] = "down"
+
+    # ── BSL / SSL levels (liquidity pools) ──
+    if swing_highs:
+        result["bsl_levels"] = sorted(
+            [h for _, h in swing_highs if h > current_price],
+        )[:3]
+    if swing_lows:
+        result["ssl_levels"] = sorted(
+            [l for _, l in swing_lows if l < current_price],
+            reverse=True,
+        )[:3]
+
+    # ── Premium / Discount (Dealing Range) ──
+    dr = get_dealing_range(df_htf, lookback=150)
+    if dr:
+        result["dealing_range"] = {
+            "top": dr.top, "bottom": dr.bottom,
+            "equilibrium": dr.equilibrium, "trend": dr.trend,
+        }
+        if current_price > dr.equilibrium:
+            result["zone"] = "premium"
+        elif current_price < dr.equilibrium:
+            result["zone"] = "discount"
+        else:
+            result["zone"] = "equilibrium"
+
+    # ── Impulsive vs corrective ──
+    disp = detect_displacement(df_htf, lookback=10)
+    if disp:
+        result["is_impulsive"] = True
+
+    return result
+
+
+def evaluate_mtf_structure(
+    df_trend: pd.DataFrame,
+    current_price: float,
+    htf_bias: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Phase 2: Medium Timeframe Structure & POI (15M / 30M / 1H).
+
+    Checks for the professional setup sequence:
+    1. Liquidity sweep (SSL or BSL) → classify as rejection or acceptance
+    2. Displacement (strong impulsive move) after sweep
+    3. BOS or CHOCH confirmed by candle body close
+    4. Valid POI (OB or FVG) formed by the displacement
+
+    المرحلة 2: الفريم المتوسط — منطقة الصفقة
+    مو كل order block صالح. مو كل FVG صالح. مو كل CHOCH صالح.
+    المنطقة القوية غالبًا يكون قبلها أو معها:
+    سحب سيولة + حركة اندفاعية + كسر هيكل حقيقي بجسم شمعة
+    """
+    result: Dict[str, Any] = {
+        "has_valid_setup": False,
+        "sweep_detected": False,
+        "sweep_type": None,           # 'sweep_rejection' or 'acceptance'
+        "sweep_level": None,          # price level of the sweep
+        "displacement_detected": False,
+        "displacement_direction": None,
+        "structure_break": None,       # StructureBreak object
+        "break_context": None,         # 'with_trend', 'against_trend', 'after_sweep'
+        "valid_poi": None,             # {"type": "OB"/"FVG", "top": f, "bottom": f}
+        "suggested_side": None,        # 'LONG' or 'SHORT'
+        "reasons": [],
+    }
+
+    if df_trend is None or df_trend.empty or len(df_trend) < 30:
+        return result
+
+    htf_direction = htf_bias.get("direction", "neutral")
+    htf_zone = htf_bias.get("zone", "equilibrium")
+    reasons: List[str] = []
+
+    # ── Step 1: Detect liquidity sweeps ──
+    sweeps = detect_liquidity_sweeps(df_trend, lookback=30)
+    if sweeps:
+        last_sweep = sweeps[-1]
+        result["sweep_detected"] = True
+        sweep_classification = classify_sweep_vs_acceptance(
+            df_trend, last_sweep, candles_after=3
+        )
+        result["sweep_type"] = sweep_classification
+        result["sweep_level"] = last_sweep.swept_price
+
+        if sweep_classification == 'acceptance':
+            # أخذ السيولة + إغلاق قوي = acceptance = continuation
+            # لا تعكس على السوق!
+            reasons.append(
+                f"⚠ Sweep → acceptance ({last_sweep.direction}): continuation, لا تعكس"
+            )
+            result["reasons"] = reasons
+            return result  # No valid reversal setup
+
+        reasons.append(
+            f"✓ {last_sweep.direction.title()} sweep rejection @ {last_sweep.swept_price:.4f}"
+        )
+
+    # ── Step 2: Detect displacement ──
+    disp = detect_displacement(df_trend, lookback=10)
+    if disp:
+        result["displacement_detected"] = True
+        result["displacement_direction"] = disp.direction
+        reasons.append(
+            f"✓ Displacement {disp.direction} ({disp.magnitude_atr:.1f}x ATR, body {disp.body_ratio:.0%})"
+        )
+
+    # ── Step 3: Detect structure break (BOS/CHOCH) with body close ──
+    struct_breaks = detect_structure_breaks(df_trend, lookback=50, require_body_close=True)
+    latest_break = struct_breaks[-1] if struct_breaks else None
+    if latest_break:
+        result["structure_break"] = latest_break
+
+        # Classify break context
+        if result["sweep_detected"]:
+            result["break_context"] = "after_sweep"  # أقوى setup
+        elif (
+            (latest_break.direction == "bullish" and htf_direction == "bullish") or
+            (latest_break.direction == "bearish" and htf_direction == "bearish")
+        ):
+            result["break_context"] = "with_trend"
+        else:
+            result["break_context"] = "against_trend"
+
+        reasons.append(
+            f"✓ {latest_break.break_type} {latest_break.direction} @ {latest_break.broken_price:.4f}"
+            f" (context: {result['break_context']})"
+        )
+
+    # ── Step 4: Find valid POI (Order Block or FVG or iFVG) ──
+    # POI is only valid AFTER sweep + displacement + structure break
+    # Priority: OB > iFVG > regular FVG
+    # All filtered by Premium/Discount zone (HTF zone must match)
+    suggested_side = None
+    if latest_break:
+        if latest_break.direction == "bullish":
+            suggested_side = "LONG"
+        elif latest_break.direction == "bearish":
+            suggested_side = "SHORT"
+
+    if suggested_side:
+        # Determine which zone the price should be in for this side
+        # LONG entries ideally want Discount zone, SHORT entries want Premium zone
+        expected_zone = "discount" if suggested_side == "LONG" else "premium"
+
+        # Check if aligned with HTF direction
+        bias_aligned = (
+            (suggested_side == "LONG" and htf_direction in ("bullish", "neutral")) or
+            (suggested_side == "SHORT" and htf_direction in ("bearish", "neutral"))
+        )
+        # Check if in the correct P/D zone
+        zone_aligned = (
+            (suggested_side == "LONG" and htf_zone in ("discount", "equilibrium")) or
+            (suggested_side == "SHORT" and htf_zone in ("premium", "equilibrium"))
+        )
+
+        # Gate logic:
+        # ✅ Trend-aligned (BOS مع الاتجاه العام) → always allow, zone is a bonus
+        # ✅ Counter-trend but in correct zone (discount for LONG, premium for SHORT) → allow
+        # ✗  Counter-trend AND wrong zone → skip — too risky
+        if not bias_aligned and not zone_aligned:
+            reasons.append(
+                f"✗ {latest_break.break_type} {latest_break.direction} opposes HTF {htf_direction}"
+                f" and wrong zone ({htf_zone}) — skipping"
+            )
+            result["reasons"] = reasons
+            return result
+
+        # Informational: note if zone is not ideal even when allowed
+        if not zone_aligned and bias_aligned:
+            reasons.append(
+                f"○ Zone is {htf_zone} (ideal: {expected_zone}) — allowed because HTF is {htf_direction}"
+            )
+
+
+        # P/D filter on OBs (detect_order_blocks already applies filter)
+        obs = detect_order_blocks(df_trend, lookback=50)
+
+        # P/D filter on FVGs via detect_unmitigated_fvgs (already filtered)
+        pd_filtered_fvgs = detect_unmitigated_fvgs(df_trend, lookback=50)
+
+        # iFVGs also go through P/D filter inside detect_ifvgs()
+        ifvgs = detect_ifvgs(df_trend, lookback=100)
+
+        poi = None
+        poi_type = None
+
+        # 1st priority: matching Order Block (already P/D filtered)
+        ob_dir = "bullish" if suggested_side == "LONG" else "bearish"
+        matching_obs = [ob for ob in obs if ob.direction == ob_dir]
+        if matching_obs:
+            nearest_ob = min(
+                matching_obs,
+                key=lambda ob: abs(current_price - (ob.top + ob.bottom) / 2)
+            )
+            poi = {"type": "OB", "top": nearest_ob.top, "bottom": nearest_ob.bottom}
+            poi_type = "OB"
+
+        # 2nd priority: iFVG — strong POI because zone already proved itself once
+        if poi is None:
+            fvg_dir = "bullish" if suggested_side == "LONG" else "bearish"
+            matching_ifvgs = [f for f in ifvgs if f.direction == fvg_dir]
+            if matching_ifvgs:
+                nearest_ifvg = min(
+                    matching_ifvgs,
+                    key=lambda f: abs(current_price - (f.top + f.bottom) / 2)
+                )
+                poi = {"type": "iFVG", "top": nearest_ifvg.top, "bottom": nearest_ifvg.bottom}
+                poi_type = "iFVG"
+
+        # 3rd priority: regular unmitigated FVG (P/D filtered via detect_unmitigated_fvgs)
+        if poi is None:
+            fvg_dir = "bullish" if suggested_side == "LONG" else "bearish"
+            matching_fvgs = [f for f in pd_filtered_fvgs if f.direction == fvg_dir]
+            if matching_fvgs:
+                nearest_fvg = min(
+                    matching_fvgs,
+                    key=lambda f: abs(current_price - (f.top + f.bottom) / 2)
+                )
+                poi = {"type": "FVG", "top": nearest_fvg.top, "bottom": nearest_fvg.bottom}
+                poi_type = "FVG"
+
+        if poi:
+            result["valid_poi"] = poi
+            reasons.append(f"✓ POI: {poi_type} @ {poi['bottom']:.4f}-{poi['top']:.4f}")
+        else:
+            reasons.append(
+                f"○ No POI in {expected_zone} zone — setup valid but entry precision reduced"
+            )
+
+        result["suggested_side"] = suggested_side
+
+    # ── Determine if setup is valid ──
+    # Best setup: Sweep rejection + Displacement + BOS/CHOCH + POI
+    # Minimum: BOS/CHOCH with HTF alignment (displacement recommended)
+    has_sweep_setup = (
+        result["sweep_detected"] and
+        result["sweep_type"] == "sweep_rejection" and
+        result["displacement_detected"] and
+        latest_break is not None
+    )
+    has_structure_setup = (
+        latest_break is not None and
+        result["break_context"] in ("with_trend", "after_sweep")
+    )
+
+    if has_sweep_setup:
+        result["has_valid_setup"] = True
+        reasons.append("✓ Full SMC setup: Sweep → Displacement → Structure Break")
+    elif has_structure_setup and result["displacement_detected"]:
+        result["has_valid_setup"] = True
+        reasons.append("✓ SMC setup: Displacement → Structure Break (with trend)")
+    elif has_structure_setup and result["break_context"] == "after_sweep":
+        result["has_valid_setup"] = True
+        reasons.append("✓ SMC setup: Sweep → Structure Break")
+    else:
+        reasons.append("✗ Incomplete SMC setup — no valid entry")
+
+    result["reasons"] = reasons
+    return result
+
+
+def evaluate_ltf_trigger(
+    df_entry: pd.DataFrame,
+    current_price: float,
+    mtf_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Phase 3: Lower Timeframe Trigger (5M / 1M).
+
+    Does NOT build trend direction. Only looks for the entry trigger:
+    1. CHOCH or MSS on LTF confirming the MTF direction
+    2. Price retraces to a POI (FVG or OB) — NOT chasing
+    3. Invalidation level = the sweep low/high
+
+    المرحلة 3: الفريم الصغير — التريغر فقط
+    على 5 دقائق أو 1 دقيقة أنا لا أبني الاتجاه. فقط أبحث عن trigger.
+    """
+    result: Dict[str, Any] = {
+        "triggered": False,
+        "entry_type": None,          # 'retracement' or 'chasing'
+        "confirmation": None,        # 'CHOCH', 'BOS', or None
+        "at_poi": False,
+        "invalidation_level": None,  # SL level
+        "reasons": [],
+    }
+
+    if df_entry is None or df_entry.empty or len(df_entry) < 15:
+        return result
+
+    if not mtf_context.get("has_valid_setup"):
+        return result
+
+    suggested_side = mtf_context.get("suggested_side")
+    if not suggested_side:
+        return result
+
+    reasons: List[str] = []
+    expected_break_dir = "bullish" if suggested_side == "LONG" else "bearish"
+
+    # ── Step 1: Look for CHOCH/BOS confirmation on LTF ──
+    ltf_breaks = detect_structure_breaks(df_entry, lookback=30, require_body_close=True)
+    confirming_break = None
+    for brk in reversed(ltf_breaks):
+        if brk.direction == expected_break_dir:
+            confirming_break = brk
+            break
+
+    if confirming_break:
+        result["confirmation"] = confirming_break.break_type
+        reasons.append(
+            f"✓ LTF {confirming_break.break_type} {confirming_break.direction}"
+            f" @ {confirming_break.broken_price:.4f}"
+        )
+    else:
+        # No LTF structure confirmation — check for displacement as alternative
+        ltf_disp = detect_displacement(df_entry, lookback=5, min_atr_mult=1.2, min_body_ratio=0.60)
+        if ltf_disp and ltf_disp.direction == expected_break_dir:
+            result["confirmation"] = "MSS"  # Market Structure Shift via displacement
+            reasons.append(
+                f"✓ LTF displacement (MSS) {ltf_disp.direction}"
+                f" ({ltf_disp.magnitude_atr:.1f}x ATR)"
+            )
+        else:
+            reasons.append("✗ No LTF structure confirmation")
+            result["reasons"] = reasons
+            return result
+
+    # ── Step 2: Check if price is at POI (retracement, not chasing) ──
+    mtf_poi = mtf_context.get("valid_poi")
+    if mtf_poi:
+        poi_top = mtf_poi["top"]
+        poi_bottom = mtf_poi["bottom"]
+        poi_range = poi_top - poi_bottom
+        price_ref = current_price
+
+        # Allow entry within the POI zone or slightly beyond (10% buffer)
+        buffer = poi_range * 0.1 if poi_range > 0 else 0
+        in_poi = (poi_bottom - buffer) <= price_ref <= (poi_top + buffer)
+
+        if in_poi:
+            result["at_poi"] = True
+            result["entry_type"] = "retracement"
+            reasons.append(
+                f"✓ Price at POI ({mtf_poi['type']}): {poi_bottom:.4f}-{poi_top:.4f}"
+            )
+        else:
+            # Check if price has already moved past the POI (chasing)
+            if suggested_side == "LONG" and price_ref > poi_top:
+                # Price is above the POI — we missed the retracement
+                dist_from_poi = (price_ref - poi_top) / price_ref * 100
+                if dist_from_poi > 0.3:  # More than 0.3% above POI = chasing
+                    result["entry_type"] = "chasing"
+                    reasons.append(
+                        f"✗ Price above POI by {dist_from_poi:.2f}% — chasing"
+                    )
+                else:
+                    result["entry_type"] = "retracement"
+                    result["at_poi"] = True
+                    reasons.append(f"✓ Price near POI (within {dist_from_poi:.2f}%)")
+            elif suggested_side == "SHORT" and price_ref < poi_bottom:
+                dist_from_poi = (poi_bottom - price_ref) / price_ref * 100
+                if dist_from_poi > 0.3:
+                    result["entry_type"] = "chasing"
+                    reasons.append(
+                        f"✗ Price below POI by {dist_from_poi:.2f}% — chasing"
+                    )
+                else:
+                    result["entry_type"] = "retracement"
+                    result["at_poi"] = True
+                    reasons.append(f"✓ Price near POI (within {dist_from_poi:.2f}%)")
+            else:
+                # Price hasn't reached POI yet — waiting is ok, allow trigger
+                result["entry_type"] = "retracement"
+                reasons.append(
+                    f"○ Price approaching POI ({mtf_poi['type']})"
+                )
+    else:
+        # No specific POI but structure is confirmed — still valid but weaker
+        result["entry_type"] = "retracement"
+        reasons.append("○ No specific POI — entry based on structure confirmation")
+
+    # ── Step 3: Set invalidation level (stop loss) ──
+    sweep_level = mtf_context.get("sweep_level")
+    if sweep_level:
+        result["invalidation_level"] = sweep_level
+        reasons.append(f"SL invalidation: {sweep_level:.4f} (sweep level)")
+    elif mtf_context.get("structure_break"):
+        brk = mtf_context["structure_break"]
+        result["invalidation_level"] = brk.broken_price
+        reasons.append(f"SL invalidation: {brk.broken_price:.4f} (structure break level)")
+
+    # ── Final trigger decision ──
+    if result["confirmation"] and result["entry_type"] != "chasing":
+        result["triggered"] = True
+        reasons.append("✓ LTF trigger confirmed — valid entry")
+    else:
+        if result["entry_type"] == "chasing":
+            reasons.append("✗ Rejected: chasing price — wait for retracement")
+        else:
+            reasons.append("✗ LTF trigger not confirmed")
+
+    result["reasons"] = reasons
+    return result
+
+
+# =============================================================================
 # Signal Generation
 # =============================================================================
 
@@ -1170,41 +1650,122 @@ def analyze_symbol(
     # Check RSI divergence
     rsi_div = check_rsi_divergence(df_entry)
     
-    # Determine potential signal direction
-    if trend == 'up':
-        potential_side = 'LONG'
-    elif trend == 'down':
-        potential_side = 'SHORT'
-    else:
-        # Neutral trend — use broader EMA structure for bias
-        ema50_t = df_trend['ema_50'].iloc[-1] if 'ema_50' in df_trend.columns else None
-        ema200_t = df_trend['ema_200'].iloc[-1] if 'ema_200' in df_trend.columns else None
-        if ema50_t is not None and ema200_t is not None and not (pd.isna(ema50_t) or pd.isna(ema200_t)):
-            if ema50_t > ema200_t:
-                potential_side = 'LONG'
-            elif ema50_t < ema200_t:
-                potential_side = 'SHORT'
+    # ═══════════════════════════════════════════════════════════════════════
+    # SMC Professional Entry Workflow — 3-Phase Gate
+    # ═══════════════════════════════════════════════════════════════════════
+    # Phase 1: HTF Bias (1H)  → direction + premium/discount + liquidity
+    # Phase 2: MTF Structure (15M) → sweep → displacement → BOS/CHOCH → POI
+    # Phase 3: LTF Trigger (1M)    → CHOCH/MSS + retracement to POI
+    # If any phase fails → No trade (potential_side = None)
+    # ═══════════════════════════════════════════════════════════════════════
+    _smc_workflow_enabled = True  # Can be made configurable via config.yaml
+
+    smc_htf_bias = None
+    smc_mtf_context = None
+    smc_ltf_trigger = None
+    potential_side = None
+
+    if _smc_workflow_enabled:
+        # Phase 1: HTF Bias
+        htf_data_for_bias = df_htf_ind if df_htf_ind is not None else df_trend
+        smc_htf_bias = determine_htf_bias(htf_data_for_bias, current_price)
+        logger.debug(
+            f"SMC Phase 1 [{symbol}]: direction={smc_htf_bias['direction']}, "
+            f"zone={smc_htf_bias['zone']}, swing={smc_htf_bias['swing_trend']}, "
+            f"BSL={smc_htf_bias['bsl_levels'][:2]}, SSL={smc_htf_bias['ssl_levels'][:2]}"
+        )
+
+        # Phase 2: MTF Structure
+        smc_mtf_context = evaluate_mtf_structure(df_trend, current_price, smc_htf_bias)
+        logger.debug(
+            f"SMC Phase 2 [{symbol}]: valid={smc_mtf_context['has_valid_setup']}, "
+            f"sweep={smc_mtf_context['sweep_detected']} ({smc_mtf_context['sweep_type']}), "
+            f"disp={smc_mtf_context['displacement_detected']}, "
+            f"break={smc_mtf_context.get('structure_break')}, "
+            f"side={smc_mtf_context['suggested_side']}"
+        )
+
+        # Phase 3: LTF Trigger
+        smc_ltf_trigger = evaluate_ltf_trigger(df_entry, current_price, smc_mtf_context)
+        logger.debug(
+            f"SMC Phase 3 [{symbol}]: triggered={smc_ltf_trigger['triggered']}, "
+            f"confirm={smc_ltf_trigger['confirmation']}, "
+            f"entry_type={smc_ltf_trigger['entry_type']}"
+        )
+
+        # Gate: determine potential_side from SMC workflow
+        if smc_mtf_context["has_valid_setup"] and smc_ltf_trigger["triggered"]:
+            potential_side = smc_mtf_context["suggested_side"]
+            logger.info(
+                f"SMC Gate PASSED [{symbol}]: {potential_side} | "
+                f"HTF={smc_htf_bias['direction']}/{smc_htf_bias['zone']} | "
+                f"sweep={smc_mtf_context['sweep_type']} | "
+                f"break={smc_mtf_context.get('break_context')} | "
+                f"trigger={smc_ltf_trigger['confirmation']}"
+            )
+        else:
+            # SMC workflow did not produce a valid entry
+            potential_side = None
+            logger.debug(
+                f"SMC Gate BLOCKED [{symbol}]: "
+                f"MTF valid={smc_mtf_context['has_valid_setup']}, "
+                f"LTF triggered={smc_ltf_trigger['triggered']}"
+            )
+
+    # Fallback: legacy EMA-based bias (only if SMC is disabled)
+    if not _smc_workflow_enabled:
+        if trend == 'up':
+            potential_side = 'LONG'
+        elif trend == 'down':
+            potential_side = 'SHORT'
+        else:
+            # Neutral trend — use broader EMA structure for bias
+            ema50_t = df_trend['ema_50'].iloc[-1] if 'ema_50' in df_trend.columns else None
+            ema200_t = df_trend['ema_200'].iloc[-1] if 'ema_200' in df_trend.columns else None
+            if ema50_t is not None and ema200_t is not None and not (pd.isna(ema50_t) or pd.isna(ema200_t)):
+                if ema50_t > ema200_t:
+                    potential_side = 'LONG'
+                elif ema50_t < ema200_t:
+                    potential_side = 'SHORT'
+                elif zone_result.zone_type == 'support':
+                    potential_side = 'LONG'
+                elif zone_result.zone_type == 'resistance':
+                    potential_side = 'SHORT'
+                else:
+                    potential_side = None
             elif zone_result.zone_type == 'support':
                 potential_side = 'LONG'
             elif zone_result.zone_type == 'resistance':
                 potential_side = 'SHORT'
             else:
-                potential_side = None  # No clear direction
-        elif zone_result.zone_type == 'support':
-            potential_side = 'LONG'
-        elif zone_result.zone_type == 'resistance':
-            potential_side = 'SHORT'
-        else:
-            potential_side = None  # No clear direction
+                potential_side = None
 
     if potential_side is None:
         # No directional bias — skip this signal
         result.side = None
         result.is_valid = False
         result.total_score = 0
+        # Attach SMC reasons for debugging even when blocked
+        if smc_mtf_context:
+            result.reasons = smc_mtf_context.get("reasons", [])
+            if smc_ltf_trigger:
+                result.reasons.extend(smc_ltf_trigger.get("reasons", []))
         return result
 
     
+    # ── Inject SMC workflow context into result ──
+    if smc_htf_bias:
+        result.zone_info['smc_htf_direction'] = smc_htf_bias.get('direction', 'neutral')
+        result.zone_info['smc_htf_zone'] = smc_htf_bias.get('zone', 'equilibrium')
+        result.zone_info['smc_bsl_levels'] = smc_htf_bias.get('bsl_levels', [])
+        result.zone_info['smc_ssl_levels'] = smc_htf_bias.get('ssl_levels', [])
+    if smc_mtf_context:
+        for r in smc_mtf_context.get("reasons", []):
+            result.reasons.append(f"[SMC-MTF] {r}")
+    if smc_ltf_trigger:
+        for r in smc_ltf_trigger.get("reasons", []):
+            result.reasons.append(f"[SMC-LTF] {r}")
+
     # Get relevant pattern
     pattern_dir = 'bullish' if potential_side == 'LONG' else 'bearish'
     pattern = get_pattern_for_direction(df_entry, pattern_dir)

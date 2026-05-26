@@ -299,6 +299,16 @@ scan_interval_seconds: 45
 schools:
   advisory_only: true
   enabled: true
+smc_workflow:
+  enabled: true
+  # Displacement: minimum ATR multiplier for valid displacement
+  displacement_min_atr_mult: 1.5
+  # Displacement: minimum body/range ratio
+  displacement_min_body_ratio: 0.65
+  # Sweep classification: candles to check after sweep
+  sweep_classification_candles: 3
+  # Minimum R:R from invalidation to nearest liquidity target
+  min_rr_to_liquidity: 1.5
 scoring:
   add_timing_to_score: true
   base_threshold: 4

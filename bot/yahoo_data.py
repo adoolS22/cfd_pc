@@ -297,7 +297,8 @@ def fetch_yahoo_ohlcv(
                 }).dropna().reset_index()
 
             # Limit rows
-            df = df.tail(limit).reset_index(drop=True)
+            df = df.tail(limit)
+            df.set_index('timestamp', inplace=True)
             _set_cached_ohlcv(cache_key, df)
             logger.info(f"Fetched {len(df)} bars for {symbol} from Yahoo Finance")
             return df

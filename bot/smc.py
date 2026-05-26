@@ -25,6 +25,7 @@ class FVG:
     mitigated: bool
     timestamp: pd.Timestamp
     index: int
+    inverted: bool = False  # True = iFVG (mitigated FVG that flipped polarity)
 
 
 @dataclass
@@ -256,6 +257,80 @@ def detect_unmitigated_fvgs(df: pd.DataFrame, lookback: int = 50) -> List[FVG]:
     return filter_pd_array_fvgs(unmitigated, df)
 
 
+def detect_ifvgs(df: pd.DataFrame, lookback: int = 100) -> List[FVG]:
+    """
+    Detect Inversion Fair Value Gaps (iFVG).
+
+    An iFVG forms when a regular FVG gets FULLY mitigated (price passed through
+    the entire gap), then the zone FLIPS polarity:
+    - Bullish FVG that got fully filled → becomes bearish iFVG (resistance)
+    - Bearish FVG that got fully filled → becomes bullish iFVG (support)
+
+    Why it works: the original FVG was an institutional imbalance zone.
+    When price returns to fill it completely, the zone often "inverts" and
+    the same institution now defends it from the opposite side.
+
+    Premium/Discount filter applied:
+    - Bullish iFVG (now acts as support) must be in Discount zone.
+    - Bearish iFVG (now acts as resistance) must be in Premium zone.
+
+    المبدأ: FVG تعبّأ بالكامل → انعكاس الدور → iFVG كـ POI عكسي
+    """
+    ifvgs: List[FVG] = []
+    if len(df) < 5:
+        return ifvgs
+
+    all_fvgs = detect_fvgs(df, lookback=lookback)
+
+    for fvg in all_fvgs:
+        if not fvg.mitigated:
+            continue  # Only care about fully mitigated FVGs
+
+        # Check how deeply price entered the zone after formation
+        future_df = df.iloc[fvg.index + 2:]
+        if future_df.empty:
+            continue
+
+        fully_pierced = False
+        if fvg.direction == 'bullish':
+            # Bullish FVG fully pierced = price closed BELOW the FVG bottom
+            # (not just touched it — full close-through)
+            if future_df['close'].min() < fvg.bottom:
+                fully_pierced = True
+            # Create inverse bearish iFVG (zone now acts as resistance)
+            if fully_pierced:
+                ifvg = FVG(
+                    direction='bearish',   # Inverted direction
+                    top=fvg.top,
+                    bottom=fvg.bottom,
+                    mitigated=False,       # Fresh as an iFVG POI
+                    timestamp=fvg.timestamp,
+                    index=fvg.index,
+                    inverted=True,
+                )
+                ifvgs.append(ifvg)
+
+        elif fvg.direction == 'bearish':
+            # Bearish FVG fully pierced = price closed ABOVE the FVG top
+            if future_df['close'].max() > fvg.top:
+                fully_pierced = True
+            # Create inverse bullish iFVG (zone now acts as support)
+            if fully_pierced:
+                ifvg = FVG(
+                    direction='bullish',   # Inverted direction
+                    top=fvg.top,
+                    bottom=fvg.bottom,
+                    mitigated=False,
+                    timestamp=fvg.timestamp,
+                    index=fvg.index,
+                    inverted=True,
+                )
+                ifvgs.append(ifvg)
+
+    # Apply Premium/Discount filter — same rule as regular FVGs
+    return filter_pd_array_fvgs(ifvgs, df)
+
+
 def filter_pd_array_obs(obs: List[OrderBlock], df: pd.DataFrame) -> List[OrderBlock]:
     """Applies Premium & Discount Matrix rules to Order Blocks."""
     dr = get_dealing_range(df)
@@ -454,6 +529,172 @@ def get_nearest_order_block(obs: List[OrderBlock], current_price: float, directi
 
 
 # =============================================================================
+# Displacement Detection (Strong Impulsive Moves)
+# =============================================================================
+
+@dataclass
+class Displacement:
+    direction: str        # 'bullish' or 'bearish'
+    magnitude_atr: float  # size relative to ATR
+    body_ratio: float     # body / total range
+    start_index: int
+    end_index: int
+    timestamp: pd.Timestamp
+
+
+def detect_displacement(
+    df: pd.DataFrame,
+    lookback: int = 10,
+    min_atr_mult: float = 1.5,
+    min_body_ratio: float = 0.65,
+) -> Optional[Displacement]:
+    """
+    Detect a strong impulsive price move (displacement) in recent candles.
+
+    A displacement is a large, decisive candle (or 2-3 consecutive candles) where:
+    - The total move exceeds min_atr_mult × ATR
+    - The body covers at least min_body_ratio of the total range
+      (i.e., it's a real move, not a wick-dominated candle)
+
+    This is used to confirm that institutional interest is present after a
+    liquidity sweep — without displacement, a sweep alone is meaningless.
+
+    Returns the most recent displacement, or None if none found.
+    """
+    if len(df) < lookback + 14:
+        return None
+
+    # Calculate ATR if not present
+    if 'atr_14' in df.columns:
+        atr = float(df['atr_14'].iloc[-1])
+    else:
+        tr_series = pd.concat([
+            df['high'] - df['low'],
+            (df['high'] - df['close'].shift(1)).abs(),
+            (df['low'] - df['close'].shift(1)).abs(),
+        ], axis=1).max(axis=1)
+        atr = float(tr_series.rolling(14).mean().iloc[-1])
+
+    if atr <= 0:
+        return None
+
+    start = max(0, len(df) - lookback)
+
+    # Check single candles first (strongest signal)
+    for i in range(len(df) - 1, start - 1, -1):
+        c = df.iloc[i]
+        body = abs(float(c['close']) - float(c['open']))
+        total_range = float(c['high']) - float(c['low'])
+        if total_range <= 0:
+            continue
+
+        body_ratio = body / total_range
+        magnitude = total_range / atr
+
+        if magnitude >= min_atr_mult and body_ratio >= min_body_ratio:
+            direction = 'bullish' if float(c['close']) > float(c['open']) else 'bearish'
+            return Displacement(
+                direction=direction,
+                magnitude_atr=round(magnitude, 2),
+                body_ratio=round(body_ratio, 2),
+                start_index=i,
+                end_index=i,
+                timestamp=df.index[i],
+            )
+
+    # Check 2-candle combinations (still strong)
+    for i in range(len(df) - 1, start, -1):
+        c1 = df.iloc[i - 1]
+        c2 = df.iloc[i]
+        combo_open = float(c1['open'])
+        combo_close = float(c2['close'])
+        combo_high = max(float(c1['high']), float(c2['high']))
+        combo_low = min(float(c1['low']), float(c2['low']))
+        body = abs(combo_close - combo_open)
+        total_range = combo_high - combo_low
+        if total_range <= 0:
+            continue
+
+        body_ratio = body / total_range
+        magnitude = total_range / atr
+
+        if magnitude >= min_atr_mult and body_ratio >= min_body_ratio:
+            # Both candles should move in the same direction
+            dir1 = float(c1['close']) > float(c1['open'])
+            dir2 = float(c2['close']) > float(c2['open'])
+            if dir1 == dir2:
+                direction = 'bullish' if combo_close > combo_open else 'bearish'
+                return Displacement(
+                    direction=direction,
+                    magnitude_atr=round(magnitude, 2),
+                    body_ratio=round(body_ratio, 2),
+                    start_index=i - 1,
+                    end_index=i,
+                    timestamp=df.index[i],
+                )
+
+    return None
+
+
+# =============================================================================
+# Sweep vs Acceptance Classification
+# =============================================================================
+
+def classify_sweep_vs_acceptance(
+    df: pd.DataFrame,
+    sweep: LiquiditySweep,
+    candles_after: int = 3,
+) -> str:
+    """
+    After a liquidity sweep, classify whether it was:
+
+    - 'sweep_rejection': Price wicked past the level but closed back inside
+      and subsequent candles confirm rejection (wick-only move).
+      → Potential reversal setup.
+
+    - 'acceptance': Price closed strongly beyond the swept level and
+      subsequent candles held or continued beyond it.
+      → Continuation / do NOT fade.
+
+    This is the golden rule: "أخذ BSL = احتمال انعكاس، وليس إشارة بيع وحدها"
+    - Sweep + rejection → look for reversal
+    - Sweep + acceptance → continuation, do NOT reverse
+    """
+    sweep_idx = sweep.index
+    swept_price = sweep.swept_price
+
+    # Need candles after the sweep to classify
+    if sweep_idx + candles_after >= len(df):
+        # Not enough data after sweep — conservative: treat as rejection
+        # (the sweep candle itself already closed inside by definition)
+        return 'sweep_rejection'
+
+    # Check candles AFTER the sweep
+    closes_beyond = 0
+    for offset in range(1, candles_after + 1):
+        idx = sweep_idx + offset
+        if idx >= len(df):
+            break
+        candle_close = float(df.iloc[idx]['close'])
+
+        if sweep.direction == 'bearish':
+            # Bearish sweep = swept a high → check if closes stay ABOVE
+            if candle_close > swept_price:
+                closes_beyond += 1
+        else:
+            # Bullish sweep = swept a low → check if closes stay BELOW
+            if candle_close < swept_price:
+                closes_beyond += 1
+
+    # If majority of subsequent candles closed beyond the swept level
+    # → acceptance (price accepted the new level, not rejecting)
+    if closes_beyond >= max(1, candles_after // 2 + 1):
+        return 'acceptance'
+
+    return 'sweep_rejection'
+
+
+# =============================================================================
 # Break of Structure (BOS) & Change of Character (CHoCH)
 # =============================================================================
 
@@ -466,7 +707,11 @@ class StructureBreak:
     index: int
 
 
-def detect_structure_breaks(df: pd.DataFrame, lookback: int = 50) -> List[StructureBreak]:
+def detect_structure_breaks(
+    df: pd.DataFrame,
+    lookback: int = 50,
+    require_body_close: bool = False,
+) -> List[StructureBreak]:
     """
     Detect Break of Structure (BOS) and Change of Character (CHoCH).
 
@@ -477,6 +722,14 @@ def detect_structure_breaks(df: pd.DataFrame, lookback: int = 50) -> List[Struct
     CHoCH — structural break AGAINST the prevailing swing trend (potential reversal).
       - Bullish CHoCH : downtrend + close above previous swing high
       - Bearish CHoCH : uptrend  + close below previous swing low
+
+    Args:
+        df: OHLCV DataFrame
+        lookback: Number of candles to scan for swing points
+        require_body_close: If True, the break must be confirmed by a candle
+            whose BODY (not just wick) closes beyond the swing level.
+            This filters out wick-only fakeout breaks.
+            القاعدة: "كسر هيكل حقيقي: BOS أو CHOCH بجسم شمعة، مو مجرد ذيل"
 
     Returns list of StructureBreak objects (most recent last).
     """
@@ -515,14 +768,22 @@ def detect_structure_breaks(df: pd.DataFrame, lookback: int = 50) -> List[Struct
             swing_trend = 'down'
 
     last_close = float(df['close'].iloc[-1])
+    last_open  = float(df['open'].iloc[-1])
     last_idx   = len(df) - 1
     last_ts    = df.index[-1]
+
+    # Body boundaries for body-close validation
+    body_top    = max(last_close, last_open)
+    body_bottom = min(last_close, last_open)
 
     # ── Check break above a swing high ──
     for sh_idx, sh_price in reversed(swing_highs[-5:]):
         if sh_idx >= last_idx - 1:
             continue
         if last_close > sh_price:
+            # Body-close filter: the body bottom must be above the swing
+            if require_body_close and body_bottom <= sh_price:
+                continue  # Only wick crossed — not a real break
             if swing_trend == 'up':
                 breaks.append(StructureBreak('BOS',   'bullish', sh_price, last_ts, last_idx))
             elif swing_trend == 'down':
@@ -534,6 +795,9 @@ def detect_structure_breaks(df: pd.DataFrame, lookback: int = 50) -> List[Struct
         if sl_idx >= last_idx - 1:
             continue
         if last_close < sl_price:
+            # Body-close filter: the body top must be below the swing
+            if require_body_close and body_top >= sl_price:
+                continue  # Only wick crossed — not a real break
             if swing_trend == 'down':
                 breaks.append(StructureBreak('BOS',   'bearish', sl_price, last_ts, last_idx))
             elif swing_trend == 'up':
