@@ -1,31 +1,21 @@
 import sqlite3
-import pandas as pd
+conn = sqlite3.connect('signals.db')
+cur = conn.cursor()
+cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
+print("Tables in signals.db:", cur.fetchall())
 
-def check_db():
-    conn = sqlite3.connect('signals.db')
-    
-    print("--- Outcomes ---")
-    try:
-        df = pd.read_sql("SELECT outcome, COUNT(*) as count FROM signal_outcomes GROUP BY outcome", conn)
-        print(df)
-    except Exception as e:
-        print("Error reading outcomes:", e)
+try:
+    cur.execute("SELECT symbol, side, created_at, outcome FROM signals ORDER BY created_at DESC LIMIT 5")
+    print("\nRecent Signals:")
+    for row in cur.fetchall():
+        print(row)
+except Exception as e:
+    print("Error querying signals:", e)
 
-    print("\n--- Recent Closed Trades ---")
-    try:
-        df2 = pd.read_sql("SELECT symbol, side, outcome, pnl_pct, closed_at FROM signal_outcomes WHERE outcome != 'OPEN' ORDER BY closed_at DESC LIMIT 10", conn)
-        print(df2)
-    except Exception as e:
-        print("Error reading recent trades:", e)
-        
-    print("\n--- Rejections ---")
-    try:
-        df3 = pd.read_sql("SELECT rejection_source, COUNT(*) as count FROM rejected_signals GROUP BY rejection_source", conn)
-        print(df3)
-    except Exception as e:
-        print("Error reading rejections:", e)
-        
-    conn.close()
-
-if __name__ == "__main__":
-    check_db()
+try:
+    cur.execute("SELECT symbol, side, created_at, outcome FROM rejected_signals ORDER BY created_at DESC LIMIT 5")
+    print("\nRecent Rejected:")
+    for row in cur.fetchall():
+        print(row)
+except Exception as e:
+    print("Error querying rejected:", e)

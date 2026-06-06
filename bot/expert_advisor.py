@@ -16,7 +16,6 @@ from openai import OpenAIError
 from .risk import RiskLevels
 from .utils import OpenAIConfig
 
-
 ADVISOR_PROMPT = """أنت متداول محترف ومحافظ بخبرة 40 سنة في الأسواق المالية (الفوركس، الكريبتو، الأسهم) ومتخصص حصراً في مفاهيم المال الذكي والسلوك السعري (Smart Money Concepts & Price Action).
 
 مهمتك:
