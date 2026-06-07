@@ -3049,7 +3049,7 @@ def scan_symbol(
         
     except Exception as e:
         logger.error(f"Error scanning {symbol} [{signal_mode}]: {e}")
-        notifier.send_error(str(e), f"{symbol} [{signal_mode}]")
+        # notifier.send_error(str(e), f"{symbol} [{signal_mode}]")
         return ''
 
 
