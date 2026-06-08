@@ -2735,14 +2735,23 @@ def check_exit_conditions(
         return None
 
     min_strength = max(1, int(getattr(config.time_analysis, 'exit_min_pattern_strength', 3)))
+    
+    # Reverse-close guard: require consecutive opposite candle closes.
+    confirm_bars = max(1, int(getattr(config.time_analysis, 'exit_reverse_confirmation_bars', 2)))
+
+    # Major Cryptos (BTC, ETH, etc) are prone to fakeouts/liquidity sweeps.
+    # We decrease exit sensitivity (increase required strength and confirmation) for them.
+    major_cryptos = ['BTC', 'ETH', 'SOL', 'BNB']
+    if any(m in symbol.upper() for m in major_cryptos):
+        min_strength += 2
+        confirm_bars += 1
+
     if reversal_pattern.strength < min_strength:
         logger.debug(
             f"{symbol} exit skipped: pattern={reversal_pattern.name} strength={reversal_pattern.strength} < {min_strength}"
         )
         return None
 
-    # Reverse-close guard: require consecutive opposite candle closes.
-    confirm_bars = max(1, int(getattr(config.time_analysis, 'exit_reverse_confirmation_bars', 2)))
     if len(df_entry) < confirm_bars + 2:
         logger.debug(f"{symbol} exit skipped: insufficient bars for reverse confirmation")
         return None

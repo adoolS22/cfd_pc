@@ -95,7 +95,7 @@ ml_engine:
 mt5:
   auto_trade:
     enabled: true
-    fixed_lot: 0.01
+    fixed_lot: 0.02
     max_spread: 0.0
     max_spread_pct: 0.0
   default_symbol: XAUUSD

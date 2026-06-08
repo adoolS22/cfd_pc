@@ -1040,7 +1040,13 @@ class TelegramNotifier:
             
         try:
             url = self.TELEGRAM_PHOTO_URL.format(token=self.bot_token)
-            data = {"chat_id": self.chat_id, "caption": caption, "parse_mode": "HTML"}
+            
+            # Telegram caption limit is 1024 chars. Truncate if necessary.
+            safe_caption = caption
+            if len(safe_caption) > 1020:
+                safe_caption = safe_caption[:1020] + "..."
+                
+            data = {"chat_id": self.chat_id, "caption": safe_caption, "parse_mode": "HTML"}
             with open(photo_path, "rb") as bf:
                 files = {"photo": bf}
                 response = requests.post(url, data=data, files=files, timeout=45)

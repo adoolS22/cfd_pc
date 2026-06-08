@@ -2949,11 +2949,6 @@ def scan_symbol(
                         
                         base_lot = float(auto_trade_cfg.get("fixed_lot", 0.01))
                         
-                        # Force minimum lot for Gold, Silver, Indices, etc as requested
-                        is_macro = any(m in symbol.upper() for m in ["XAU", "XAG", "US500", "USOIL", "USD"])
-                        if is_macro:
-                            base_lot = vol_min
-                            
                         base_lot = max(base_lot, vol_min)
                         base_lot = round(base_lot / vol_step) * vol_step
                         
