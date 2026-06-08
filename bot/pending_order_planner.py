@@ -63,6 +63,41 @@ Higher-timeframe bias
 -> cancellation if invalidated
 
 ==================================================
+MARKET MAKER TRAP AVOIDANCE
+==================================================
+
+The bot must avoid becoming easy liquidity.
+
+Before placing any pending order, check if the setup may be a trap.
+
+Reject or cancel the order if:
+- Entry is in the middle of the dealing range.
+- Long entry is in premium without confirmed bullish acceptance.
+- Short entry is in discount without confirmed bearish acceptance.
+- Stop loss is placed at an obvious liquidity level.
+- Price already reached the intended liquidity target before the order was filled.
+- The POI is already mitigated or stale.
+- The move that created the POI looks like news volatility without clean structure.
+- Liquidity classification is unresolved between sweep and acceptance.
+- Opposite displacement appears before entry.
+- Opposite MSS/CHOCH appears before entry.
+- Spread or volatility makes real risk-to-reward invalid.
+- Current price is too close to the planned entry, meaning planning is late.
+
+The goal is not to predict with certainty.
+The goal is to place orders only when the bot has a location advantage:
+- HTF bias
+- correct premium/discount
+- clear liquidity draw
+- valid sweep or acceptance
+- displacement
+- structural shift
+- fresh POI
+- logical invalidation
+- clear target
+- real RR >= 1:2
+
+==================================================
 DECISION VALUES
 ==================================================
 
