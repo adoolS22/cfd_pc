@@ -2410,7 +2410,10 @@ def scan_symbol(
                 # Ollama config
                 ollama_cfg = getattr(config, "ollama", None)
                 _ollama_url = getattr(ollama_cfg, "base_url", "http://localhost:11434") if ollama_cfg else "http://localhost:11434"
-                _ollama_model = getattr(ollama_cfg, "model", "qwen2.5:7b") if ollama_cfg else "qwen2.5:7b"
+                _ollama_model = getattr(ollama_cfg, "model", "qwen2.5:14b") if ollama_cfg else "qwen2.5:14b"
+                _ollama_temp = float(getattr(ollama_cfg, "temperature", 0.1) if ollama_cfg else 0.1)
+                _ollama_ctx = int(getattr(ollama_cfg, "num_ctx", 8192) if ollama_cfg else 8192)
+                _ollama_predict = int(getattr(ollama_cfg, "num_predict", 2000) if ollama_cfg else 2000)
 
                 # 1. Collect multi-TF structured SMC analysis (code-first)
                 existing_orders = client.get_pending_orders(symbol)
@@ -2436,6 +2439,9 @@ def scan_symbol(
                     min_rr=_min_rr,
                     min_score=_min_score,
                     max_sl_pct=_max_sl_pct,
+                    temperature=_ollama_temp,
+                    num_ctx=_ollama_ctx,
+                    num_predict=_ollama_predict,
                 )
 
                 # 3. Execute via OrderLifecycleManager

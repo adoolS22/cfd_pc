@@ -164,7 +164,11 @@ pending_order_planner:
 ollama:
   base_url: http://localhost:11434
   enabled: true
-  model: qwen2.5:7b
+  model: qwen2.5:14b
+  temperature: 0.1
+  num_ctx: 8192
+  num_predict: 2000
+  format: json
 onchain:
   enabled: true
 openai:

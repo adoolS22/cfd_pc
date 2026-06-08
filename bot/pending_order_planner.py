@@ -493,11 +493,14 @@ def plan_pending_order(
     symbol: str,
     mtf_data: Dict[str, Any],
     ollama_base_url: str = "http://localhost:11434",
-    ollama_model: str = "qwen2.5:7b",
+    ollama_model: str = "qwen2.5:14b",
     timeout_seconds: int = 60,
     min_rr: float = 2.0,
     min_score: int = 75,
     max_sl_pct: float = 3.0,
+    temperature: float = 0.1,
+    num_ctx: int = 8192,
+    num_predict: int = 2000,
 ) -> PendingOrderDecision:
     """Send structured MTF analysis to Ollama and get a pending-order decision.
 
@@ -505,11 +508,14 @@ def plan_pending_order(
         symbol: Trading symbol
         mtf_data: Output from collect_mtf_analysis() — pre-computed SMC structures
         ollama_base_url: Ollama API base URL
-        ollama_model: Model name (e.g. qwen2.5:7b)
+        ollama_model: Model name (e.g. qwen2.5:14b)
         timeout_seconds: Request timeout
         min_rr: Minimum risk-to-reward ratio (default 2.0)
         min_score: Minimum score for actionable orders (default 75)
         max_sl_pct: Maximum SL distance as % of entry price (default 3.0)
+        temperature: LLM temperature (default 0.1)
+        num_ctx: LLM context window (default 8192)
+        num_predict: LLM max generated tokens (default 2000)
 
     Returns:
         PendingOrderDecision with the validated decision
@@ -550,8 +556,15 @@ def plan_pending_order(
                 {"role": "system", "content": SMC_PENDING_ORDER_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.05,
-            max_tokens=2000,
+            temperature=temperature,
+            max_tokens=num_predict,
+            response_format={"type": "json_object"},
+            extra_body={
+                "options": {
+                    "num_gpu": 999,
+                    "num_ctx": num_ctx
+                }
+            }
         )
         elapsed = time.time() - t0
 
