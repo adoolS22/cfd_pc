@@ -2412,8 +2412,11 @@ def scan_symbol(
                 _ollama_url = getattr(ollama_cfg, "base_url", "http://localhost:11434") if ollama_cfg else "http://localhost:11434"
                 _ollama_model = getattr(ollama_cfg, "model", "qwen2.5:14b") if ollama_cfg else "qwen2.5:14b"
                 _ollama_temp = float(getattr(ollama_cfg, "temperature", 0.1) if ollama_cfg else 0.1)
-                _ollama_ctx = int(getattr(ollama_cfg, "num_ctx", 8192) if ollama_cfg else 8192)
-                _ollama_predict = int(getattr(ollama_cfg, "num_predict", 2000) if ollama_cfg else 2000)
+                _ollama_ctx = int(getattr(ollama_cfg, "num_ctx", 4096) if ollama_cfg else 4096)
+                _ollama_predict = int(getattr(ollama_cfg, "num_predict", 1500) if ollama_cfg else 1500)
+                _ollama_gpu = int(getattr(ollama_cfg, "num_gpu", 999) if ollama_cfg else 999)
+                _ollama_stream = bool(getattr(ollama_cfg, "stream", False) if ollama_cfg else False)
+                _ollama_keep_alive = str(getattr(ollama_cfg, "keep_alive", "30m") if ollama_cfg else "30m")
 
                 # 1. Collect multi-TF structured SMC analysis (code-first)
                 existing_orders = client.get_pending_orders(symbol)
@@ -2442,6 +2445,9 @@ def scan_symbol(
                     temperature=_ollama_temp,
                     num_ctx=_ollama_ctx,
                     num_predict=_ollama_predict,
+                    num_gpu=_ollama_gpu,
+                    stream=_ollama_stream,
+                    keep_alive=_ollama_keep_alive,
                 )
 
                 # 3. Execute via OrderLifecycleManager

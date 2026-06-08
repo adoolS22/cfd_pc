@@ -501,6 +501,9 @@ def plan_pending_order(
     temperature: float = 0.1,
     num_ctx: int = 8192,
     num_predict: int = 2000,
+    num_gpu: int = 999,
+    stream: bool = False,
+    keep_alive: str = "30m",
 ) -> PendingOrderDecision:
     """Send structured MTF analysis to Ollama and get a pending-order decision.
 
@@ -516,6 +519,9 @@ def plan_pending_order(
         temperature: LLM temperature (default 0.1)
         num_ctx: LLM context window (default 8192)
         num_predict: LLM max generated tokens (default 2000)
+        num_gpu: Number of GPUs to use (default 999 for all)
+        stream: Whether to stream the response (default False)
+        keep_alive: How long to keep model loaded (default 30m)
 
     Returns:
         PendingOrderDecision with the validated decision
@@ -558,10 +564,12 @@ def plan_pending_order(
             ],
             temperature=temperature,
             max_tokens=num_predict,
+            stream=stream,
             response_format={"type": "json_object"},
             extra_body={
+                "keep_alive": keep_alive,
                 "options": {
-                    "num_gpu": 999,
+                    "num_gpu": num_gpu,
                     "num_ctx": num_ctx
                 }
             }
