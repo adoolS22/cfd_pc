@@ -356,6 +356,7 @@ class Config:
     mt5: Dict[str, Any] = field(default_factory=dict)
     mt5_bridge: Dict[str, Any] = field(default_factory=dict)
     schools: Dict[str, Any] = field(default_factory=dict)
+    pending_order_planner: Dict[str, Any] = field(default_factory=dict)
     logging_level: str = "INFO"
     logging_file: str = "signal_bot.log"
     
@@ -782,6 +783,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
         mt5=dict(data.get('mt5', {}) or {}),
         mt5_bridge=dict(data.get('mt5_bridge', {}) or {}),
         schools=dict(data.get('schools', {}) or {}),
+        pending_order_planner=dict(data.get('pending_order_planner', {}) or {}),
         logging_level=logging_data.get('level', 'INFO'),
         logging_file=logging_data.get('file', 'signal_bot.log')
     )
