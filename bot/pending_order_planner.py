@@ -545,38 +545,34 @@ def plan_pending_order(
         f"{json.dumps(mtf_data, ensure_ascii=False, indent=2, default=str)}"
     )
 
-    # Call Ollama via OpenAI-compatible API
+    # Call Ollama via native API
     try:
-        from openai import OpenAI
+        import requests
 
-        client = OpenAI(
-            api_key="ollama",
-            base_url=f"{ollama_base_url}/v1",
-            timeout=max(15, timeout_seconds),
-        )
+        url = f"{ollama_base_url}/api/generate"
+        combined_prompt = f"{SMC_PENDING_ORDER_PROMPT}\n\n{user_content}"
+        
+        payload = {
+            "model": ollama_model,
+            "prompt": combined_prompt,
+            "format": "json",
+            "stream": stream,
+            "options": {
+                "temperature": temperature,
+                "num_ctx": num_ctx,
+                "num_predict": num_predict,
+                "num_gpu": num_gpu,
+            },
+            "keep_alive": keep_alive,
+        }
 
         t0 = time.time()
-        response = client.chat.completions.create(
-            model=ollama_model,
-            messages=[
-                {"role": "system", "content": SMC_PENDING_ORDER_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=temperature,
-            max_tokens=num_predict,
-            stream=stream,
-            response_format={"type": "json_object"},
-            extra_body={
-                "keep_alive": keep_alive,
-                "options": {
-                    "num_gpu": num_gpu,
-                    "num_ctx": num_ctx
-                }
-            }
-        )
+        response = requests.post(url, json=payload, timeout=max(15, timeout_seconds))
+        response.raise_for_status()
         elapsed = time.time() - t0
 
-        raw_text = (response.choices[0].message.content or "").strip()
+        data = response.json()
+        raw_text = data.get("response", "").strip()
         logger.debug(f"Planner LLM response for {symbol} ({elapsed:.1f}s): {raw_text[:200]}...")
 
     except Exception as e:
