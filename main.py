@@ -2386,7 +2386,7 @@ def scan_symbol(
         planner_cfg = getattr(config, "pending_order_planner", None)
         _planner_enabled = planner_cfg and getattr(planner_cfg, "enabled", False) if planner_cfg else False
 
-        if _planner_enabled and exchange.id in ("mt5", "metatrader5"):
+        if _planner_enabled and (getattr(exchange, "mt5", None) is not None or exchange.id in ("mt5", "metatrader5", "mt5_bridge")):
             try:
                 from bot.mt5_client import MT5Client
                 from bot.mtf_data_collector import collect_mtf_analysis
