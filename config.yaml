@@ -152,6 +152,15 @@ mt5_bridge:
   timeout_seconds: 6
   token_env: MT5_BRIDGE_TOKEN
   verify_ssl: false
+pending_order_planner:
+  enabled: true
+  max_pending_per_symbol: 1
+  default_expiry_hours: 8
+  min_score: 75
+  min_rr: 2.0
+  max_sl_pct: 3.0
+  scan_interval_seconds: 60
+  timeout_seconds: 60
 ollama:
   base_url: http://localhost:11434
   enabled: true

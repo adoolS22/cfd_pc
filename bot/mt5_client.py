@@ -493,6 +493,229 @@ class MT5Client:
                 return []
             return [_namedtuple_to_dict(p) for p in positions if p.magic == 202604]
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # Pending Order Management (BUY LIMIT / SELL LIMIT)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _validate_broker_constraints(
+        self, info: Dict[str, Any], order_type_str: str, price: float, sl: float, tp: float, lot: float,
+    ) -> Dict[str, Any]:
+        """Validate all broker constraints before placing a pending order.
+        Returns dict with 'valid': bool and 'errors': list[str], 'lot': adjusted lot."""
+        errors: List[str] = []
+
+        # Trade mode check
+        trade_mode = info.get("trade_mode", 4)
+        if trade_mode == 0:
+            errors.append(f"Trading disabled by broker (trade_mode=0)")
+            return {"valid": False, "errors": errors, "lot": lot}
+
+        # Volume constraints
+        vol_min = float(info.get("volume_min", 0.01))
+        vol_max = float(info.get("volume_max", 100.0))
+        vol_step = float(info.get("volume_step", 0.01))
+
+        adjusted_lot = max(lot, vol_min)
+        adjusted_lot = min(adjusted_lot, vol_max)
+        if vol_step > 0:
+            adjusted_lot = round(adjusted_lot / vol_step) * vol_step
+
+        if adjusted_lot < vol_min:
+            errors.append(f"Lot {lot} below minimum {vol_min}")
+        if adjusted_lot > vol_max:
+            errors.append(f"Lot {lot} above maximum {vol_max}")
+
+        # Stops level: minimum distance from price to SL/TP (in points)
+        point = float(info.get("point", 0.00001))
+        stops_level = int(info.get("trade_stops_level", 0))
+        freeze_level = int(info.get("trade_freeze_level", 0))
+
+        if point > 0 and stops_level > 0:
+            min_distance = stops_level * point
+            if sl > 0 and abs(price - sl) < min_distance:
+                errors.append(
+                    f"SL too close to entry: distance={abs(price - sl):.5f}, "
+                    f"minimum={min_distance:.5f} (stops_level={stops_level})"
+                )
+            if tp > 0 and abs(price - tp) < min_distance:
+                errors.append(
+                    f"TP too close to entry: distance={abs(price - tp):.5f}, "
+                    f"minimum={min_distance:.5f} (stops_level={stops_level})"
+                )
+
+        # Freeze level: minimum distance from current price to pending order price
+        if point > 0 and freeze_level > 0:
+            tick = mt5.symbol_info_tick(self._resolve_symbol(""))
+            if tick:
+                current = tick.bid if "SELL" in order_type_str.upper() else tick.ask
+                if current > 0 and abs(current - price) < freeze_level * point:
+                    errors.append(
+                        f"Pending order price too close to market: "
+                        f"distance={abs(current - price):.5f}, "
+                        f"minimum={freeze_level * point:.5f} (freeze_level={freeze_level})"
+                    )
+
+        return {"valid": len(errors) == 0, "errors": errors, "lot": adjusted_lot}
+
+    def place_pending_order(
+        self,
+        symbol: str,
+        order_type: str,
+        lot: float,
+        price: float,
+        sl: float,
+        tp: float,
+        expiry_hours: int = 8,
+    ) -> Optional[Dict[str, Any]]:
+        """Place a pending limit order (BUY_LIMIT or SELL_LIMIT) with full broker validation.
+
+        Args:
+            symbol: Trading symbol
+            order_type: 'BUY_LIMIT' or 'SELL_LIMIT'
+            lot: Volume
+            price: Pending order trigger price
+            sl: Stop loss price
+            tp: Take profit price
+            expiry_hours: Hours until the order auto-cancels (0 = GTC)
+
+        Returns:
+            Order result dict or None on failure
+        """
+        with self._lock:
+            self._require_package()
+            info = self.ensure_symbol(symbol)
+            mt5_symbol = self._resolve_symbol(symbol)
+
+            # Map order type
+            ot = order_type.upper().replace(" ", "_")
+            if ot == "BUY_LIMIT":
+                mt5_type = mt5.ORDER_TYPE_BUY_LIMIT
+            elif ot == "SELL_LIMIT":
+                mt5_type = mt5.ORDER_TYPE_SELL_LIMIT
+            else:
+                logger.error(f"Invalid pending order type: {order_type}")
+                return None
+
+            # Broker constraint validation
+            validation = self._validate_broker_constraints(info, ot, price, sl, tp, lot)
+            if not validation["valid"]:
+                for err in validation["errors"]:
+                    logger.error(f"Broker constraint violation [{mt5_symbol}]: {err}")
+                return None
+            adjusted_lot = validation["lot"]
+
+            # Build expiry
+            import time as _time
+            type_time = mt5.ORDER_TIME_GTC
+            expiration = 0
+            if expiry_hours > 0:
+                type_time = mt5.ORDER_TIME_SPECIFIED
+                expiration = int(_time.time()) + (expiry_hours * 3600)
+
+            request = {
+                "action": mt5.TRADE_ACTION_PENDING,
+                "symbol": mt5_symbol,
+                "volume": float(adjusted_lot),
+                "type": mt5_type,
+                "price": float(price),
+                "sl": float(sl),
+                "tp": float(tp),
+                "deviation": 0,
+                "magic": 202604,
+                "comment": "SMC_PendingOrder",
+                "type_time": type_time,
+                "type_filling": mt5.ORDER_FILLING_RETURN,
+            }
+            if expiration > 0:
+                request["expiration"] = expiration
+
+            result = mt5.order_send(request)
+            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                code = result.retcode if result else "None"
+                comment = getattr(result, "comment", "") if result else ""
+                logger.error(
+                    f"Pending order failed [{mt5_symbol}]: retcode={code} {comment} | "
+                    f"Request: type={ot} price={price} sl={sl} tp={tp} lot={adjusted_lot}"
+                )
+                return None
+
+            logger.info(
+                f"Pending order placed: {ot} {mt5_symbol} Lot={adjusted_lot} "
+                f"Price={price} SL={sl} TP={tp} Ticket={result.order} Expiry={expiry_hours}h"
+            )
+            return _namedtuple_to_dict(result)
+
+    def cancel_pending_order(self, ticket: int) -> bool:
+        """Cancel a pending order by ticket number."""
+        with self._lock:
+            self._require_package()
+            request = {
+                "action": mt5.TRADE_ACTION_REMOVE,
+                "order": ticket,
+            }
+            result = mt5.order_send(request)
+            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                code = result.retcode if result else "None"
+                logger.error(f"Cancel pending order failed: ticket={ticket} retcode={code}")
+                return False
+
+            logger.info(f"Pending order cancelled: ticket={ticket}")
+            return True
+
+    def get_pending_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all active pending orders for this bot, optionally filtered by symbol."""
+        with self._lock:
+            self._require_package()
+            self.connect_mt5()
+
+            if symbol:
+                mt5_symbol = self._resolve_symbol(symbol)
+                orders = mt5.orders_get(symbol=mt5_symbol)
+            else:
+                orders = mt5.orders_get()
+
+            if orders is None:
+                return []
+
+            # Filter by bot magic number
+            return [_namedtuple_to_dict(o) for o in orders if o.magic == 202604]
+
+    def modify_pending_order(
+        self,
+        ticket: int,
+        price: Optional[float] = None,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+    ) -> bool:
+        """Modify price, SL, or TP of an existing pending order."""
+        with self._lock:
+            self._require_package()
+            orders = mt5.orders_get(ticket=ticket)
+            if not orders:
+                logger.error(f"Pending order not found: ticket={ticket}")
+                return False
+
+            order = orders[0]
+            request = {
+                "action": mt5.TRADE_ACTION_MODIFY,
+                "order": ticket,
+                "symbol": order.symbol,
+                "price": float(price) if price is not None else order.price_open,
+                "sl": float(sl) if sl is not None else order.sl,
+                "tp": float(tp) if tp is not None else order.tp,
+                "type_time": order.type_time,
+                "expiration": order.time_expiration,
+            }
+
+            result = mt5.order_send(request)
+            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                code = result.retcode if result else "None"
+                logger.error(f"Modify pending order failed: ticket={ticket} retcode={code}")
+                return False
+
+            logger.info(f"Pending order modified: ticket={ticket} price={request['price']} sl={request['sl']} tp={request['tp']}")
+            return True
+
 
 def connect_mt5(
     login: Any,

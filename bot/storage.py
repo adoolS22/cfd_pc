@@ -195,6 +195,36 @@ class SignalStorage:
                 ON rejected_signals(created_at DESC)
             """)
 
+            # Pending limit orders (SMC planner)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS pending_orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    order_type TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    stop_loss REAL NOT NULL,
+                    take_profit_1 REAL NOT NULL,
+                    take_profit_2 REAL,
+                    lot REAL NOT NULL,
+                    mt5_ticket INTEGER,
+                    status TEXT DEFAULT 'PENDING',
+                    score INTEGER,
+                    setup_quality TEXT,
+                    reason TEXT,
+                    forecast_scenario TEXT,
+                    created_at TEXT NOT NULL,
+                    valid_until_hours INTEGER DEFAULT 8,
+                    filled_at TEXT,
+                    cancelled_at TEXT,
+                    llm_analysis TEXT
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_pending_orders_symbol_status
+                ON pending_orders(symbol, status)
+            """)
+
             # Backward-compatible migrations for existing DB files.
             self._ensure_column(cursor, "signals", "take_profit_near", "REAL")
             self._ensure_column(cursor, "signal_outcomes", "take_profit_near", "REAL")
@@ -583,6 +613,99 @@ class SignalStorage:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM pending_entries WHERE expires_at <= ?", (now,))
             conn.commit()
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Pending Limit Orders (SMC Planner)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def save_pending_order(self, order: Dict[str, Any]) -> int:
+        """Save a new pending limit order to the database."""
+        now = datetime.now(timezone.utc).isoformat()
+        llm_json = ""
+        if order.get("llm_analysis"):
+            try:
+                llm_json = json.dumps(order["llm_analysis"], ensure_ascii=False, default=str)
+            except Exception:
+                llm_json = str(order["llm_analysis"])
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO pending_orders
+                (symbol, order_type, entry_price, stop_loss, take_profit_1, take_profit_2,
+                 lot, mt5_ticket, status, score, setup_quality, reason,
+                 forecast_scenario, created_at, valid_until_hours, llm_analysis)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                order.get("symbol", ""),
+                order.get("order_type", ""),
+                float(order.get("entry_price", 0)),
+                float(order.get("stop_loss", 0)),
+                float(order.get("take_profit_1", 0)),
+                float(order.get("take_profit_2", 0) or 0),
+                float(order.get("lot", 0.01)),
+                int(order.get("mt5_ticket", 0) or 0),
+                order.get("status", "PENDING"),
+                int(order.get("score", 0) or 0),
+                order.get("setup_quality", ""),
+                order.get("reason", ""),
+                order.get("forecast_scenario", ""),
+                now,
+                int(order.get("valid_until_hours", 8) or 8),
+                llm_json,
+            ))
+            conn.commit()
+            order_id = int(cursor.lastrowid)
+            logger.info(f"Saved pending order #{order_id}: {order.get('order_type')} {order.get('symbol')}")
+            return order_id
+
+    def update_pending_order_status(self, mt5_ticket: int, status: str) -> None:
+        """Update the status of a pending order by MT5 ticket."""
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            if status == "CANCELLED":
+                cursor.execute(
+                    "UPDATE pending_orders SET status = ?, cancelled_at = ? WHERE mt5_ticket = ?",
+                    (status, now, mt5_ticket),
+                )
+            elif status == "FILLED":
+                cursor.execute(
+                    "UPDATE pending_orders SET status = ?, filled_at = ? WHERE mt5_ticket = ?",
+                    (status, now, mt5_ticket),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE pending_orders SET status = ? WHERE mt5_ticket = ?",
+                    (status, mt5_ticket),
+                )
+            conn.commit()
+
+    def get_active_pending_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all active pending orders, optionally filtered by symbol."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            if symbol:
+                cursor.execute(
+                    "SELECT * FROM pending_orders WHERE status = 'PENDING' AND symbol = ?",
+                    (symbol,),
+                )
+            else:
+                cursor.execute("SELECT * FROM pending_orders WHERE status = 'PENDING'")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_pending_order_history(self, lookback_days: int = 30) -> List[Dict[str, Any]]:
+        """Get pending order history for the last N days."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM pending_orders WHERE created_at >= ? ORDER BY created_at DESC",
+                (cutoff,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
 
     

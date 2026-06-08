@@ -2382,6 +2382,98 @@ def scan_symbol(
             )
             return ''
         
+        # --- START PENDING ORDER PLANNER HOOK (replaces old market-order hook) ---
+        planner_cfg = getattr(config, "pending_order_planner", None)
+        _planner_enabled = planner_cfg and getattr(planner_cfg, "enabled", False) if planner_cfg else False
+
+        if _planner_enabled and exchange.id in ("mt5", "metatrader5"):
+            try:
+                from bot.mt5_client import MT5Client
+                from bot.mtf_data_collector import collect_mtf_analysis
+                from bot.pending_order_planner import plan_pending_order
+                from bot.order_manager import OrderLifecycleManager
+
+                # Get or create MT5 client
+                client = getattr(exchange, "mt5", None)
+                if client is None:
+                    client = MT5Client.from_config(config.mt5)
+                    client.connect_mt5()
+
+                # Planner config
+                _min_rr = float(getattr(planner_cfg, "min_rr", 2.0))
+                _min_score = int(getattr(planner_cfg, "min_score", 75))
+                _max_sl_pct = float(getattr(planner_cfg, "max_sl_pct", 3.0))
+                _max_pending = int(getattr(planner_cfg, "max_pending_per_symbol", 1))
+                _expiry_hours = int(getattr(planner_cfg, "default_expiry_hours", 8))
+                _timeout = int(getattr(planner_cfg, "timeout_seconds", 60))
+
+                # Ollama config
+                ollama_cfg = getattr(config, "ollama", None)
+                _ollama_url = getattr(ollama_cfg, "base_url", "http://localhost:11434") if ollama_cfg else "http://localhost:11434"
+                _ollama_model = getattr(ollama_cfg, "model", "qwen2.5:7b") if ollama_cfg else "qwen2.5:7b"
+
+                # 1. Collect multi-TF structured SMC analysis (code-first)
+                existing_orders = client.get_pending_orders(symbol)
+                existing_positions = [
+                    p for p in client.get_all_bot_positions()
+                    if symbol.replace("/", "").replace(":", "").upper() in str(p.get("symbol", "")).upper()
+                ]
+
+                mtf_data = collect_mtf_analysis(
+                    symbol=symbol,
+                    mt5_client=client,
+                    existing_pending_orders=existing_orders,
+                    existing_positions=existing_positions,
+                )
+
+                # 2. Ask LLM for proactive pending-order decision
+                decision = plan_pending_order(
+                    symbol=symbol,
+                    mtf_data=mtf_data,
+                    ollama_base_url=_ollama_url,
+                    ollama_model=_ollama_model,
+                    timeout_seconds=_timeout,
+                    min_rr=_min_rr,
+                    min_score=_min_score,
+                    max_sl_pct=_max_sl_pct,
+                )
+
+                # 3. Execute via OrderLifecycleManager
+                order_mgr = OrderLifecycleManager(
+                    max_pending_per_symbol=_max_pending,
+                    default_expiry_hours=_expiry_hours,
+                )
+
+                auto_trade_cfg = config.mt5.get("auto_trade", {}) if config.mt5 else {}
+                base_lot = float(auto_trade_cfg.get("fixed_lot", 0.02))
+                order_result = order_mgr.process_decision(
+                    decision=decision,
+                    mt5_client=client,
+                    storage=storage,
+                    notifier=notifier,
+                    lot=base_lot,
+                )
+
+                if order_result and order_result.get("action") == "placed":
+                    logger.info(
+                        f"✅ Pending order placed for {symbol}: "
+                        f"{order_result.get('order_type')} @ {order_result.get('entry_price')} "
+                        f"R:R={order_result.get('risk_to_reward')} Score={order_result.get('score')}"
+                    )
+
+                # 4. Periodic cleanup of expired orders (every scan)
+                try:
+                    order_mgr.cleanup_expired_orders(client, storage, notifier)
+                except Exception as cleanup_err:
+                    logger.debug(f"Expired order cleanup error: {cleanup_err}")
+
+            except Exception as e:
+                logger.error(f"Pending Order Planner failed for {symbol}: {e}")
+            
+            # BYPASS ALL OLD REACTIVE LOGIC
+            return ''
+        # --- END PENDING ORDER PLANNER HOOK ---
+
         # Portfolio-level risk gate (applies only to new entries).
         allow_portfolio, portfolio_reason = _check_portfolio_risk_gate(storage, config, symbol)
         if not allow_portfolio:
@@ -2925,79 +3017,6 @@ def scan_symbol(
                 generated = None
 
             notifier.send_signal(result, chart_path=generated)
-            
-            # --- START AUTO-TRADING HOOK ---
-            if auto_trade_cfg.get("enabled", False) and exchange.id in ("mt5", "metatrader5"):
-                try:
-                    from bot.mt5_client import MT5Client
-                    
-                    # Target the actual underlying MT5 Client directly if available on the exchange, 
-                    # or instantiate a fresh one since MT5 login states are shared terminal-wide
-                    client = getattr(exchange, "mt5", None)
-                    if client is None:
-                        client = MT5Client.from_config(config.mt5)
-                        client.connect_mt5()
-                        
-                    sym_info = client.get_symbol_info(symbol)
-                    
-                    trade_mode = sym_info.get("trade_mode", 4)
-                    if trade_mode == 0:
-                        logger.info(f"Auto-trade skipped. Trading is disabled by broker for {symbol}.")
-                    else:
-                        vol_min = sym_info.get("volume_min", sym_info.get("symbol_info", {}).get("volume_min", 0.01)) if sym_info else 0.01
-                        vol_step = sym_info.get("volume_step", sym_info.get("symbol_info", {}).get("volume_step", 0.01)) if sym_info else 0.01
-                        
-                        base_lot = float(auto_trade_cfg.get("fixed_lot", 0.01))
-                        
-                        base_lot = max(base_lot, vol_min)
-                        base_lot = round(base_lot / vol_step) * vol_step
-                        
-                        # Safe split calculation
-                        if base_lot >= (vol_min * 2):
-                            lot1 = max(vol_min, round((base_lot * 0.75) / vol_step) * vol_step)
-                            lot2 = round((base_lot - lot1) / vol_step) * vol_step
-                            if lot2 < vol_min:
-                                lot1 = base_lot
-                                lot2 = 0.0
-                        else:
-                            lot1 = base_lot
-                            lot2 = 0.0
-                            
-                        logger.info(f"Auto-trading execution triggered for {symbol} ({result.side}) with lot={base_lot} (split: {lot1} TP1, {lot2} TP2)")
-                        
-                        # Execute T1 (75% or 100%)
-                        trade_res = client.execute_trade(
-                            symbol=symbol,
-                            side=result.side,
-                            lot=lot1,
-                            sl=result.risk_levels.stop_loss if hasattr(result.risk_levels, "stop_loss") else 0.0,
-                            tp=result.risk_levels.take_profit_1 if hasattr(result.risk_levels, "take_profit_1") else 0.0,
-                        )
-                        
-                        if trade_res:
-                            logger.info(f"Successfully placed MT5 TP1 trade! Ticket: {trade_res.get('order')}")
-                            
-                            # --- PARTIAL EXECUTION / SCALE OUT: Trade 2 for TP2 ---
-                            trade_res2 = None
-                            if lot2 > 0:
-                                trade_res2 = client.execute_trade(
-                                    symbol=symbol,
-                                    side=result.side,
-                                    lot=lot2,
-                                    sl=result.risk_levels.stop_loss if hasattr(result.risk_levels, "stop_loss") else 0.0,
-                                    tp=result.risk_levels.take_profit_2 if hasattr(result.risk_levels, "take_profit_2") else 0.0,
-                                )
-                            
-                            ticket_msg = f"T1: {trade_res.get('order')}"
-                            if trade_res2:
-                                ticket_msg += f" | T2: {trade_res2.get('order')}"
-                                logger.info(f"Successfully placed MT5 TP2 trade! Ticket: {trade_res2.get('order')}")
-
-                            if notifier.enabled:
-                                notifier.send_text(f"🤖 <b>Auto-Trade Executed (Split T1/T2):</b> {result.side} {symbol}\nLots: {lot1}|{lot2}\nTickets: {ticket_msg}")
-                except Exception as e:
-                    logger.error(f"MT5 Auto-trading execution failed for {symbol}: {e}")
-            # --- END AUTO-TRADING HOOK ---
             
             # Store signal (mode-specific)
             if result.risk_levels:
