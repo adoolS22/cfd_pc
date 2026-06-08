@@ -2383,8 +2383,8 @@ def scan_symbol(
             return ''
         
         # --- START PENDING ORDER PLANNER HOOK (replaces old market-order hook) ---
-        planner_cfg = getattr(config, "pending_order_planner", None)
-        _planner_enabled = planner_cfg and getattr(planner_cfg, "enabled", False) if planner_cfg else False
+        planner_cfg = getattr(config, "pending_order_planner", {})
+        _planner_enabled = planner_cfg.get("enabled", False) if planner_cfg else False
 
         if _planner_enabled:
             try:
@@ -2400,12 +2400,12 @@ def scan_symbol(
                     client.connect_mt5()
 
                 # Planner config
-                _min_rr = float(getattr(planner_cfg, "min_rr", 2.0))
-                _min_score = int(getattr(planner_cfg, "min_score", 75))
-                _max_sl_pct = float(getattr(planner_cfg, "max_sl_pct", 3.0))
-                _max_pending = int(getattr(planner_cfg, "max_pending_per_symbol", 1))
-                _expiry_hours = int(getattr(planner_cfg, "default_expiry_hours", 8))
-                _timeout = int(getattr(planner_cfg, "timeout_seconds", 60))
+                _min_rr = float(planner_cfg.get("min_rr", 2.0))
+                _min_score = int(planner_cfg.get("min_score", 75))
+                _max_sl_pct = float(planner_cfg.get("max_sl_pct", 3.0))
+                _max_pending = int(planner_cfg.get("max_pending_per_symbol", 1))
+                _expiry_hours = int(planner_cfg.get("default_expiry_hours", 8))
+                _timeout = int(planner_cfg.get("timeout_seconds", 60))
 
                 # Ollama config
                 ollama_cfg = getattr(config, "ollama", None)
