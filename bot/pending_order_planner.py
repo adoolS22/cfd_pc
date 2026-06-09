@@ -875,7 +875,7 @@ def plan_pending_order(
     symbol: str,
     mtf_data: Dict[str, Any],
     ollama_base_url: str = "http://localhost:11434",
-    ollama_model: str = "qwen2.5:14b",
+    ollama_model: str = "deepseek-r1:14b",
     timeout_seconds: int = 180,
     min_rr: float = 2.0,
     min_score: int = 65,
