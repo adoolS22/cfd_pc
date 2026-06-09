@@ -2410,7 +2410,7 @@ def scan_symbol(
                 # Ollama config
                 ollama_cfg = getattr(config, "ollama", None)
                 _ollama_url = getattr(ollama_cfg, "base_url", "http://localhost:11434") if ollama_cfg else "http://localhost:11434"
-                _ollama_model = getattr(ollama_cfg, "model", "qwen2.5:14b") if ollama_cfg else "qwen2.5:14b"
+                _ollama_model = getattr(ollama_cfg, "model", "deepseek-r1:14b") if ollama_cfg else "deepseek-r1:14b"
                 _ollama_temp = float(getattr(ollama_cfg, "temperature", 0.1) if ollama_cfg else 0.1)
                 _ollama_ctx = int(getattr(ollama_cfg, "num_ctx", 4096) if ollama_cfg else 4096)
                 _ollama_predict = int(getattr(ollama_cfg, "num_predict", 1500) if ollama_cfg else 1500)
