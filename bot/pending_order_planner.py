@@ -164,7 +164,7 @@ Setup quality:
 - 60 to 69: WEAK
 - Below 60: INVALID
 
-Only return PLACE_BUY_LIMIT or PLACE_SELL_LIMIT if score >= 75.
+Only return PLACE_BUY_LIMIT or PLACE_SELL_LIMIT if score >= 65.
 
 ==================================================
 JSON OUTPUT SCHEMA
@@ -702,7 +702,7 @@ def _apply_guardrails(
     parsed: Dict[str, Any],
     current_price: float,
     min_rr: float = 2.0,
-    min_score: int = 75,
+    min_score: int = 65,
     max_sl_pct: float = 3.0,
     spread: float = 0.0,
 ) -> PendingOrderDecision:
@@ -875,7 +875,7 @@ def plan_pending_order(
     ollama_model: str = "qwen2.5:14b",
     timeout_seconds: int = 180,
     min_rr: float = 2.0,
-    min_score: int = 75,
+    min_score: int = 65,
     max_sl_pct: float = 3.0,
     temperature: float = 0.1,
     num_ctx: int = 12288,
