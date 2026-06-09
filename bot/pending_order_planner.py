@@ -438,7 +438,7 @@ def summarize_mtf_data(mtf_data: Dict[str, Any]) -> Dict[str, Any]:
         "liquidity_sweeps",
     }
     
-    for tf_key in ["daily", "h4", "h1", "m15"]:
+    for tf_key in ["daily", "h4", "h1", "m15", "m5", "m1"]:
         tf_data = mtf_data.get(tf_key, {})
         if not tf_data:
             continue
@@ -641,9 +641,18 @@ def _normalize_llm_response(parsed: Dict[str, Any]) -> Dict[str, Any]:
     # Handle list of take profits
     tp_list = parsed.get("take_profit", [])
     if isinstance(tp_list, list) and tp_list:
-        tp1 = float(tp_list[0])
+        first_tp = tp_list[0]
+        if isinstance(first_tp, dict) and first_tp.get("price"):
+            tp1 = float(first_tp["price"])
+        elif isinstance(first_tp, (int, float, str)):
+            tp1 = float(first_tp)
+            
         if len(tp_list) > 1:
-            tp2 = float(tp_list[1])
+            second_tp = tp_list[1]
+            if isinstance(second_tp, dict) and second_tp.get("price"):
+                tp2 = float(second_tp["price"])
+            elif isinstance(second_tp, (int, float, str)):
+                tp2 = float(second_tp)
     
     tp2 = tp2 or float(parsed.get("take_profit_2", 0) or 0)
     
@@ -709,7 +718,16 @@ def _apply_guardrails(
         decision = "NO_TRADE"
         violations.append(f"Invalid decision value, defaulting to NO_TRADE")
 
-    score = int(parsed.get("score", 0))
+    raw_score = parsed.get("score", 0)
+    if isinstance(raw_score, dict):
+        # If the LLM returned a dict of scores, just default to 75
+        score = 75
+    else:
+        try:
+            score = int(float(raw_score))
+        except (ValueError, TypeError):
+            score = 0
+
     quality = str(parsed.get("setup_quality", "INVALID")).upper()
 
     planned = parsed.get("planned_order", {}) or {}
