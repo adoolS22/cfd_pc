@@ -241,6 +241,10 @@ Never place an order without clear draw on liquidity or invalidation.
 Never place an order if risk-to-reward is below 1:2.
 Longs preferred from discount. Shorts preferred from premium.
 If the setup is not clean, return NO_TRADE.
+
+CRITICAL: You MUST return ONLY one valid JSON object matching the schema above.
+Do NOT return analysis text, markdown, explanations, or per-timeframe descriptions.
+Return ONLY the JSON object. Nothing else.
 """
 
 
@@ -406,8 +410,43 @@ def extract_htf_context(mtf_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def summarize_mtf_data(mtf_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Strip out raw candles and large datasets to create a concise LLM prompt."""
-    return extract_htf_context(mtf_data)
+    """Build a focused, per-timeframe summary for the LLM prompt.
+    
+    Sends key SMC fields per timeframe (trend, displacement, structure breaks,
+    FVGs, OBs, dealing range, BSL/SSL) — rich enough for decisions but compact
+    enough that the LLM stays on-schema.
+    """
+    prefilter_ctx = extract_htf_context(mtf_data)
+    
+    summary = {
+        "symbol": mtf_data.get("symbol"),
+        "current_price": mtf_data.get("current_price"),
+        "spread": mtf_data.get("spread"),
+        "bias": prefilter_ctx.get("bias", {}),
+        "premium_discount": prefilter_ctx.get("premium_discount", {}),
+        "existing_pending_orders": mtf_data.get("existing_pending_orders", []),
+        "existing_positions": mtf_data.get("existing_positions", []),
+        "timeframes": {},
+    }
+    
+    # Key fields to extract per timeframe
+    _KEEP_KEYS = {
+        "timeframe", "trend", "atr", "rsi", "adx",
+        "displacement", "structure_breaks",
+        "fvgs", "order_blocks",
+        "dealing_range", "bsl_levels", "ssl_levels",
+        "liquidity_sweeps",
+    }
+    
+    for tf_key in ["daily", "h4", "h1", "m15"]:
+        tf_data = mtf_data.get(tf_key, {})
+        if not tf_data:
+            continue
+        tf_summary = {k: v for k, v in tf_data.items() if k in _KEEP_KEYS}
+        if tf_summary:
+            summary["timeframes"][tf_key] = tf_summary
+    
+    return summary
 
 
 def manage_existing_pending_order(order: Dict[str, Any], mtf_data: Dict[str, Any]) -> tuple[str, str]:
@@ -539,6 +578,106 @@ def _strict_parse_json(raw_text: str) -> Optional[Dict[str, Any]]:
 
     # All strategies failed
     return None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Normalize LLM response to expected schema
+# ═══════════════════════════════════════════════════════════════════════
+
+def _normalize_llm_response(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert alternative LLM response formats to the expected schema.
+    
+    The qwen2.5 model sometimes returns trade data in non-standard formats:
+    - {"entry": {"side": "sell", "price": X}, "stop_loss": {"price": Y}, ...}
+    - {"signal": "SELL", "price": X, "stop_loss": X, ...}
+    - {"order_type": "SELL_LIMIT", "entry_price": X, ...}
+    
+    This normalizer maps them to the expected schema so guardrails can process them.
+    """
+    # If already in expected format, return as-is
+    if "decision" in parsed and "planned_order" in parsed:
+        return parsed
+    
+    result = dict(parsed)  # shallow copy
+    
+    # --- Detect entry/exit format ---
+    entry = parsed.get("entry", {})
+    sl_obj = parsed.get("stop_loss", {})
+    tp_obj = parsed.get("take_profit", parsed.get("exit", {}))
+    signal = str(parsed.get("signal", parsed.get("order_type", ""))).upper()
+    
+    # Extract side from entry object or signal field
+    side = ""
+    if isinstance(entry, dict):
+        side = str(entry.get("side", "")).upper()
+    if not side and signal:
+        side = signal
+    
+    # Extract prices from nested or flat structure
+    entry_price = 0.0
+    stop_loss = 0.0
+    tp1 = 0.0
+    tp2 = 0.0
+    
+    if isinstance(entry, dict) and entry.get("price"):
+        entry_price = float(entry["price"])
+    elif parsed.get("entry_price"):
+        entry_price = float(parsed["entry_price"])
+    elif parsed.get("price"):
+        entry_price = float(parsed["price"])
+        
+    if isinstance(sl_obj, dict) and sl_obj.get("price"):
+        stop_loss = float(sl_obj["price"])
+    elif isinstance(parsed.get("stop_loss"), (int, float)):
+        stop_loss = float(parsed["stop_loss"])
+    
+    if isinstance(tp_obj, dict) and tp_obj.get("price"):
+        tp1 = float(tp_obj["price"])
+    elif isinstance(parsed.get("take_profit"), (int, float)):
+        tp1 = float(parsed["take_profit"])
+    elif isinstance(parsed.get("take_profit_1"), (int, float)):
+        tp1 = float(parsed["take_profit_1"])
+    
+    # Handle list of take profits
+    tp_list = parsed.get("take_profit", [])
+    if isinstance(tp_list, list) and tp_list:
+        tp1 = float(tp_list[0])
+        if len(tp_list) > 1:
+            tp2 = float(tp_list[1])
+    
+    tp2 = tp2 or float(parsed.get("take_profit_2", 0) or 0)
+    
+    # Map side to decision
+    if entry_price > 0 and stop_loss > 0 and tp1 > 0:
+        if "BUY" in side or "LONG" in side:
+            decision = "PLACE_BUY_LIMIT"
+        elif "SELL" in side or "SHORT" in side:
+            decision = "PLACE_SELL_LIMIT"
+        else:
+            # Infer from price relationship: if SL < entry, it's a buy
+            if stop_loss < entry_price:
+                decision = "PLACE_BUY_LIMIT"
+            else:
+                decision = "PLACE_SELL_LIMIT"
+        
+        result["decision"] = decision
+        result["setup_quality"] = result.get("setup_quality", "MEDIUM")
+        result["score"] = result.get("score", 75)
+        result["planned_order"] = {
+            "order_type": decision.replace("PLACE_", ""),
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "take_profit_1": tp1,
+            "take_profit_2": tp2,
+            "valid_until_hours": 8,
+            "order_reason": str(parsed.get("strategy", {}).get("description", ""))
+                           if isinstance(parsed.get("strategy"), dict) 
+                           else str(parsed.get("reason", "")),
+        }
+        logger.info(f"Normalized non-standard LLM response to {decision} "
+                     f"entry={entry_price}, sl={stop_loss}, tp1={tp1}")
+    
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -716,8 +855,8 @@ def plan_pending_order(
     min_score: int = 75,
     max_sl_pct: float = 3.0,
     temperature: float = 0.1,
-    num_ctx: int = 4096,
-    num_predict: int = 1200,
+    num_ctx: int = 12288,
+    num_predict: int = 2048,
     num_gpu: int = 999,
     stream: bool = False,
     keep_alive: str = "30m",
@@ -820,6 +959,9 @@ def plan_pending_order(
             reason="LLM returned non-JSON response",
             guardrail_violations=["non_json_response"],
         )
+
+    # Normalize non-standard LLM response formats
+    parsed = _normalize_llm_response(parsed)
 
     # Apply guardrails
     result = _apply_guardrails(

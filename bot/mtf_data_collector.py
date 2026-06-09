@@ -254,7 +254,7 @@ def _analyze_single_timeframe(
 
     # Displacement
     try:
-        disp = detect_displacement(df_ind, lookback=10)
+        disp = detect_displacement(df_ind, lookback=30)
         result["displacement"] = _displacement_to_dict(disp)
     except Exception:
         result["displacement"] = None
