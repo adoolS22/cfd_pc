@@ -237,6 +237,11 @@ FINAL RULES
 
 Be proactive, not reactive. Plan trades before price reaches the entry zone.
 Prefer pending limit orders over market entries. Never chase price.
+CRITICAL LIMIT ORDER RULES:
+- A BUY_LIMIT entry_price MUST be mathematically BELOW the current_price (Wait for pullback into a Discount POI).
+- A SELL_LIMIT entry_price MUST be mathematically ABOVE the current_price (Wait for pullback into a Premium POI).
+- If you want to trade a breakout or continuation but the current price has already passed your ideal entry, DO NOT set a Limit order in the wrong direction. Return NO_TRADE.
+- Your entry_price MUST exactly match the top or bottom of a valid FVG or OB from the lower timeframes (m15, m5, m1).
 Never place an order without clear draw on liquidity or invalidation.
 Never place an order if risk-to-reward is below 1:2.
 Longs preferred from discount. Shorts preferred from premium.
