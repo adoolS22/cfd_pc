@@ -166,6 +166,9 @@ Setup quality:
 
 Only return PLACE_BUY_LIMIT or PLACE_SELL_LIMIT if score >= 65.
 
+"""
+
+SMC_JSON_SCHEMA_PROMPT = r"""
 ==================================================
 JSON OUTPUT SCHEMA
 ==================================================
@@ -939,7 +942,7 @@ def plan_pending_order(
         import requests
 
         url = f"{ollama_base_url}/api/generate"
-        combined_prompt = f"{SMC_PENDING_ORDER_PROMPT}\n\n{user_content}"
+        combined_prompt = f"{SMC_PENDING_ORDER_PROMPT}\n\n[MARKET DATA]\n{user_content}\n\n{SMC_JSON_SCHEMA_PROMPT}"
         
         payload = {
             "model": ollama_model,
