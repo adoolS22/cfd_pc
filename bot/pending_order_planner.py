@@ -443,7 +443,7 @@ def summarize_mtf_data(mtf_data: Dict[str, Any]) -> Dict[str, Any]:
         "liquidity_sweeps",
     }
     
-    for tf_key in ["daily", "h4", "h1", "m15", "m5", "m1"]:
+    for tf_key in ["daily", "h4", "h1", "m15"]:
         tf_data = mtf_data.get(tf_key, {})
         if not tf_data:
             continue
