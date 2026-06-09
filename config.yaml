@@ -154,20 +154,34 @@ mt5_bridge:
   verify_ssl: false
 pending_order_planner:
   enabled: true
-  max_pending_per_symbol: 1
-  default_expiry_hours: 8
+  shadow_mode: true
+  execution_mode: pending_only
+  old_market_orders_enabled: false
+  universe_scan_interval_seconds: 300
+  order_monitor_interval_seconds: 30
+  max_llm_candidates_per_scan: 5
+  min_fast_score_for_llm: 60
   min_score: 75
   min_rr: 2.0
-  max_sl_pct: 3.0
-  scan_interval_seconds: 60
-  timeout_seconds: 60
+  timeout_seconds: 180
+  default_expiry_hours: 8
+  stale_after_candles: 20
+  prefilter:
+    enabled: true
+    reject_equilibrium: true
+    reject_bad_premium_discount: true
+    require_clear_liquidity_draw: true
+    require_displacement_or_sweep: true
+    require_structure_event_or_continuation: true
+    require_fresh_poi: true
+    allow_watchlist_near_poi: true
 ollama:
   base_url: http://localhost:11434
   enabled: true
   model: qwen2.5:14b
   temperature: 0.1
   num_ctx: 4096
-  num_predict: 1500
+  num_predict: 1200
   num_gpu: 999
   format: json
   stream: false

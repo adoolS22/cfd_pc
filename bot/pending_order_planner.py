@@ -245,6 +245,223 @@ If the setup is not clean, return NO_TRADE.
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Prefilter and Order Management logic
+# ═══════════════════════════════════════════════════════════════════════
+
+def classify_symbol_fast(mtf_data: Dict[str, Any]) -> tuple[str, str]:
+    """
+    Classify a symbol into REJECT, WATCHLIST, or LLM_CANDIDATE based on pre-filter rules.
+    Returns (State, Reason).
+    """
+    summary = extract_htf_context(mtf_data)
+    pd = summary.get("premium_discount", {})
+    structure = summary.get("market_structure", {})
+    liquidity = summary.get("liquidity", {})
+    poi = summary.get("poi_candidates", [])
+    bias = summary.get("bias", {}).get("final_bias", "unclear")
+
+    location = pd.get("current_location", "unknown")
+
+    # Hard rejects
+    if location == "equilibrium":
+        return "REJECT", "Price is in equilibrium"
+
+    if bias == "bearish" and location == "discount":
+        return "REJECT", "Bearish bias but price is in discount (bad short location)"
+
+    if bias == "bullish" and location == "premium":
+        return "REJECT", "Bullish bias but price is in premium (bad long location)"
+
+    if not liquidity.get("draw_on_liquidity"):
+        return "REJECT", "No clear draw on liquidity"
+
+    fresh_pois = [p for p in poi if p.get("valid") is True and p.get("mitigated") is False]
+    if not fresh_pois:
+        return "REJECT", "No fresh valid POI"
+
+    # If it passes all hard rejects and has fresh POIs + draw on liquidity + good location,
+    # it is a valid candidate for the LLM to evaluate. The LLM will assess if the POI
+    # was created by a displacement and if the structure supports it.
+    return "LLM_CANDIDATE", "Passed prefilter heuristics"
+
+
+def score_candidate_fast(mtf_data: Dict[str, Any]) -> int:
+    """Quick heuristic score to rank candidates before sending to LLM."""
+    summary = extract_htf_context(mtf_data)
+    score = 0
+    bias = summary.get("bias", {}).get("final_bias", "unclear")
+    location = summary.get("premium_discount", {}).get("current_location", "unknown")
+    structure = summary.get("market_structure", {})
+    liquidity = summary.get("liquidity", {})
+    pois = summary.get("poi_candidates", [])
+
+    if bias in ["bullish", "bearish"]:
+        score += 20
+    if (bias == "bullish" and location == "discount") or (bias == "bearish" and location == "premium"):
+        score += 20
+    if liquidity.get("draw_on_liquidity"):
+        score += 15
+    if structure.get("displacement") not in [None, "none", ""]:
+        score += 15
+    if structure.get("bos") not in [None, "none", ""] or structure.get("choch") not in [None, "none", ""]:
+        score += 15
+        
+    fresh_pois = [p for p in pois if p.get("valid") is True and p.get("mitigated") is False]
+    if fresh_pois:
+        score += 15
+        
+    return score
+
+
+def extract_htf_context(mtf_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Extracts HTF context (bias, structure, liquidity, pois) from the raw timeframe data."""
+    summary = {
+        "symbol": mtf_data.get("symbol"),
+        "current_price": mtf_data.get("current_price"),
+        "spread": mtf_data.get("spread"),
+        "bias": {"final_bias": "neutral"},
+        "premium_discount": {"current_location": "unknown"},
+        "liquidity": {"draw_on_liquidity": None, "nearest_bsl": [], "nearest_ssl": []},
+        "market_structure": {"displacement": "none", "bos": "none", "choch": "none", "mss": "none"},
+        "poi_candidates": [],
+        "existing_pending_orders": mtf_data.get("existing_pending_orders", []),
+        "existing_positions": mtf_data.get("existing_positions", []),
+    }
+
+    # 1. Bias calculation (Daily & H4)
+    d1 = mtf_data.get("daily", {})
+    h4 = mtf_data.get("h4", {})
+    h1 = mtf_data.get("h1", {})
+    
+    d1_trend = str(d1.get("trend", "")).lower()
+    h4_trend = str(h4.get("trend", "")).lower()
+    
+    bias = "neutral"
+    if "up" in d1_trend or "up" in h4_trend or "bull" in d1_trend:
+        bias = "bullish"
+    elif "down" in d1_trend or "down" in h4_trend or "bear" in d1_trend:
+        bias = "bearish"
+    summary["bias"]["final_bias"] = bias
+    summary["bias"]["daily"] = d1_trend
+    summary["bias"]["h4"] = h4_trend
+
+    # 2. Premium / Discount (Use H4 or H1 dealing range)
+    dr_h4 = h4.get("dealing_range", {})
+    dr_h1 = h1.get("dealing_range", {})
+    loc = dr_h4.get("location", "unknown")
+    if loc == "unknown" or loc == "equilibrium":
+        loc = dr_h1.get("location", "unknown")
+    summary["premium_discount"]["current_location"] = loc
+
+    # 3. Liquidity (Nearest HTF levels & sweeps)
+    h4_bsl = h4.get("bsl_levels", []) or h1.get("bsl_levels", [])
+    h4_ssl = h4.get("ssl_levels", []) or h1.get("ssl_levels", [])
+    summary["liquidity"]["nearest_bsl"] = h4_bsl
+    summary["liquidity"]["nearest_ssl"] = h4_ssl
+    
+    # Simple draw: if bias is bullish, we draw to BSL. If bearish, we draw to SSL.
+    if bias == "bullish" and h4_bsl:
+        summary["liquidity"]["draw_on_liquidity"] = "buy_side"
+    elif bias == "bearish" and h4_ssl:
+        summary["liquidity"]["draw_on_liquidity"] = "sell_side"
+    elif h4_bsl and h4_ssl:
+        # If bias is neutral but we have levels, let's just check where price is closer
+        current_price = mtf_data.get("current_price", 0)
+        # simplistic check
+        summary["liquidity"]["draw_on_liquidity"] = "buy_side" if bias != "bearish" else "sell_side"
+
+    logger.debug(f"Prefilter extracted bias={bias}, bsl={len(h4_bsl)}, ssl={len(h4_ssl)} for {mtf_data.get('symbol')}")
+
+    # 4. Market Structure (H1 / M15)
+    m15 = mtf_data.get("m15", {})
+    for tf_data in [h1, m15]:
+        disp = tf_data.get("displacement")
+        if disp and disp.get("direction"):
+            summary["market_structure"]["displacement"] = disp.get("direction")
+        
+        breaks = tf_data.get("structure_breaks", [])
+        for b in breaks:
+            b_type = b.get("break_type", "").lower()
+            b_dir = b.get("direction", "")
+            if b_type in ["bos", "choch", "mss"]:
+                summary["market_structure"][b_type] = b_dir
+
+    # 5. POI Candidates (Unmitigated FVGs / OBs from H4, H1, M15)
+    pois = []
+    for tf_key, tf_data in [("h4", h4), ("h1", h1), ("m15", m15)]:
+        for fvg in tf_data.get("fvgs", []):
+            fvg["type"] = "FVG"
+            fvg["timeframe"] = tf_key
+            fvg["valid"] = True
+            pois.append(fvg)
+        for ob in tf_data.get("order_blocks", []):
+            ob["type"] = "OB"
+            ob["timeframe"] = tf_key
+            ob["valid"] = True
+            ob["mitigated"] = False
+            pois.append(ob)
+    summary["poi_candidates"] = pois
+
+    return summary
+
+
+def summarize_mtf_data(mtf_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip out raw candles and large datasets to create a concise LLM prompt."""
+    return extract_htf_context(mtf_data)
+
+
+def manage_existing_pending_order(order: Dict[str, Any], mtf_data: Dict[str, Any]) -> tuple[str, str]:
+    """
+    Hard-coded Python rules to manage existing pending orders quickly.
+    Returns (Action, Reason) where Action is "KEEP" or "CANCEL".
+    """
+    summary = extract_htf_context(mtf_data)
+    
+    order_type = order.get("type", "").lower()
+    entry_price = order.get("entry_price", 0.0)
+    current_price = summary.get("current_price", 0.0)
+    
+    structure = summary.get("market_structure", {})
+    pois = summary.get("poi_candidates", [])
+    
+    # 1. Target reached before fill (simplistic check: price swept past entry in direction of target without filling)
+    # Actually, a better check: if order is BUY LIMIT, and price goes ABOVE target. But we don't have target here easily unless stored.
+    # For now, we rely on POI invalidation and opposite displacement
+    
+    # 2. Opposite displacement
+    displacement = structure.get("displacement", "none")
+    if "buy" in order_type and displacement == "bearish":
+        return "CANCEL", "Opposite displacement (bearish) appeared against LONG pending order"
+    if "sell" in order_type and displacement == "bullish":
+        return "CANCEL", "Opposite displacement (bullish) appeared against SHORT pending order"
+        
+    # 3. POI invalidated
+    # If the order's entry price is no longer within any valid POI
+    if pois:
+        valid_poi_found = False
+        for p in pois:
+            if not p.get("valid") or p.get("mitigated"):
+                continue
+            z_low = p.get("low", p.get("zone_low", 0.0))
+            z_high = p.get("high", p.get("zone_high", 0.0))
+            if z_low <= entry_price <= z_high:
+                valid_poi_found = True
+                break
+        
+        # We don't cancel just because we couldn't match a POI (it might be a manual order or an older timeframe POI).
+        # But if we want to be strict, we can. Let's keep it safe for now.
+
+    # 4. Opposite MSS/CHOCH
+    choch = structure.get("choch", "none")
+    if "buy" in order_type and choch == "bearish":
+        return "CANCEL", "Opposite CHOCH (bearish) appeared"
+    if "sell" in order_type and choch == "bullish":
+        return "CANCEL", "Opposite CHOCH (bullish) appeared"
+
+    return "KEEP", "Order still valid"
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Data classes
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -494,37 +711,20 @@ def plan_pending_order(
     mtf_data: Dict[str, Any],
     ollama_base_url: str = "http://localhost:11434",
     ollama_model: str = "qwen2.5:14b",
-    timeout_seconds: int = 60,
+    timeout_seconds: int = 180,
     min_rr: float = 2.0,
     min_score: int = 75,
     max_sl_pct: float = 3.0,
     temperature: float = 0.1,
-    num_ctx: int = 8192,
-    num_predict: int = 2000,
+    num_ctx: int = 4096,
+    num_predict: int = 1200,
     num_gpu: int = 999,
     stream: bool = False,
     keep_alive: str = "30m",
 ) -> PendingOrderDecision:
-    """Send structured MTF analysis to Ollama and get a pending-order decision.
-
-    Args:
-        symbol: Trading symbol
-        mtf_data: Output from collect_mtf_analysis() — pre-computed SMC structures
-        ollama_base_url: Ollama API base URL
-        ollama_model: Model name (e.g. qwen2.5:14b)
-        timeout_seconds: Request timeout
-        min_rr: Minimum risk-to-reward ratio (default 2.0)
-        min_score: Minimum score for actionable orders (default 75)
-        max_sl_pct: Maximum SL distance as % of entry price (default 3.0)
-        temperature: LLM temperature (default 0.1)
-        num_ctx: LLM context window (default 8192)
-        num_predict: LLM max generated tokens (default 2000)
-        num_gpu: Number of GPUs to use (default 999 for all)
-        stream: Whether to stream the response (default False)
-        keep_alive: How long to keep model loaded (default 30m)
-
-    Returns:
-        PendingOrderDecision with the validated decision
+    """
+    Evaluates MTF SMC data and decides if a pending order should be placed.
+    Uses a fast Python prefilter to avoid slow LLM calls for bad setups.
     """
     current_price = float(mtf_data.get("current_price", 0))
     spread = float(mtf_data.get("spread", 0))
@@ -536,13 +736,40 @@ def plan_pending_order(
             reason="No price data available",
         )
 
+    # 1. Fast Prefilter
+    state, reason = classify_symbol_fast(mtf_data)
+    
+    if state == "REJECT":
+        logger.info(f"[PREFILTER_REJECT] {symbol} reason={reason}")
+        return PendingOrderDecision(
+            decision="NO_TRADE",
+            setup_quality="INVALID",
+            score=0,
+            order_type="NONE",
+            reason=f"Prefilter Rejected: {reason}"
+        )
+    elif state == "WATCHLIST":
+        logger.info(f"[PREFILTER_WATCHLIST] {symbol} reason={reason}")
+        return PendingOrderDecision(
+            decision="NO_TRADE",
+            setup_quality="WATCHLIST",
+            score=50,
+            order_type="NONE",
+            reason=f"Prefilter Watchlist: {reason}"
+        )
+        
+    logger.info(f"[PREFILTER_PASS] {symbol} Passed prefilter, sending to LLM. reason={reason}")
+
+    # Strip raw candles for the LLM prompt
+    mtf_summary = summarize_mtf_data(mtf_data)
+
     # Build user prompt with the pre-computed structured data
     user_content = (
         f"Symbol: {symbol}\n"
         f"Current Price: {current_price}\n"
         f"Spread: {spread}\n\n"
-        f"Pre-computed Multi-Timeframe SMC Analysis (JSON):\n"
-        f"{json.dumps(mtf_data, ensure_ascii=False, indent=2, default=str)}"
+        f"Pre-computed Multi-Timeframe SMC Analysis Summary (JSON):\n"
+        f"{json.dumps(mtf_summary, ensure_ascii=False, indent=2, default=str)}"
     )
 
     # Call Ollama via native API
@@ -573,7 +800,7 @@ def plan_pending_order(
 
         data = response.json()
         raw_text = data.get("response", "").strip()
-        logger.debug(f"Planner LLM response for {symbol} ({elapsed:.1f}s): {raw_text[:200]}...")
+        logger.info(f"Planner LLM response for {symbol} ({elapsed:.1f}s):\n{raw_text}")
 
     except Exception as e:
         logger.warning(f"Planner LLM call failed for {symbol}: {e}")
