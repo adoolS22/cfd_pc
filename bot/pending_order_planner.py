@@ -278,11 +278,8 @@ def classify_symbol_fast(mtf_data: Dict[str, Any]) -> tuple[str, str]:
     if location == "equilibrium":
         return "REJECT", "Price is in equilibrium"
 
-    if bias == "bearish" and location == "discount":
-        return "REJECT", "Bearish bias but price is in discount (bad short location)"
-
-    if bias == "bullish" and location == "premium":
-        return "REJECT", "Bullish bias but price is in premium (bad long location)"
+    # Removed faulty prefilter blocks for "bearish and discount" and "bullish and premium"
+    # because a pending order planner *should* analyze these setups to place limits ahead of time.
 
     if not liquidity.get("draw_on_liquidity"):
         return "REJECT", "No clear draw on liquidity"
@@ -942,7 +939,8 @@ def plan_pending_order(
         import requests
 
         url = f"{ollama_base_url}/api/generate"
-        combined_prompt = f"{SMC_PENDING_ORDER_PROMPT}\n\n[MARKET DATA]\n{user_content}\n\n{SMC_JSON_SCHEMA_PROMPT}"
+        price_reminder = f"\n\nCRITICAL MATH RULES:\n1. The current price is {current_price}.\n2. For BUY_LIMIT: Stop Loss must be LOWER than Entry. Take Profit must be HIGHER than Entry.\n3. For SELL_LIMIT: Stop Loss must be HIGHER than Entry. Take Profit must be LOWER than Entry.\n\n"
+        combined_prompt = f"{SMC_PENDING_ORDER_PROMPT}\n\n[MARKET DATA]\n{user_content}{price_reminder}{SMC_JSON_SCHEMA_PROMPT}"
         
         payload = {
             "model": ollama_model,

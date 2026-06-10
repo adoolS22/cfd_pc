@@ -183,9 +183,9 @@ ollama:
   model: deepseek-r1:14b
   temperature: 0.1
   num_ctx: 4096
-  num_predict: 1200
+  num_predict: 2048
   num_gpu: 999
-  format: json
+  # format: json (disabled for deepseek-r1 to allow <think> tags without breaking)
   stream: false
   keep_alive: 30m
 onchain:
