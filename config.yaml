@@ -133,9 +133,11 @@ mt5:
     THETAUSDT: THETAUSDm
     UNIUSDT: UNIUSDm
     US500: US500m
+    US30: US30m
     USDCAD: USDCADm
     USDCHF: USDCHFm
     USDJPY: USDJPYm
+    USTEC: USTECm
     USOIL: USOILm
     WTIUSD: USOILm
     XAGUSD: XAGUSDm
@@ -161,8 +163,8 @@ pending_order_planner:
   order_monitor_interval_seconds: 30
   max_llm_candidates_per_scan: 5
   min_fast_score_for_llm: 60
-  min_score: 75
-  min_rr: 2.0
+  min_score: 55
+  min_rr: 1.5
   timeout_seconds: 180
   default_expiry_hours: 8
   stale_after_candles: 20
@@ -178,7 +180,7 @@ pending_order_planner:
 ollama:
   base_url: http://localhost:11434
   enabled: true
-  model: qwen2.5:14b
+  model: deepseek-r1:14b
   temperature: 0.1
   num_ctx: 4096
   num_predict: 1200
@@ -354,42 +356,16 @@ scoring:
   max_timing_points_used: 4
   min_threshold: 2.0
 symbols:
-- AAVE/USDT:USDT
-- ADA/USDT:USDT
-- AUDUSD
-- BNB/USDT:USDT
 - BTC/USDT:USDT
-- COMP/USDT:USDT
-- DOGE/USDT:USDT
-- DOT/USDT:USDT
-- ENJ/USDT:USDT
 - ETH/USDT:USDT
-- EURUSD
-- FIL/USDT:USDT
-- GBPUSD
-- HBAR/USDT:USDT
-- LINK/USDT:USDT
-- LTC/USDT:USDT
-- MANA/USDT:USDT
-- MATIC/USDT:USDT
-- NZDUSD
-- OILUSD
-- SNP500
-- SNX/USDT:USDT
-- SOL/USDT:USDT
-- SPX500
-- THETA/USDT:USDT
-- UNI/USDT:USDT
-- US500
-- USDCAD
-- USDCHF
-- USDJPY
-- USOIL
-- WTIUSD
-- XAGUSD
 - XAUUSD
-- XRP/USDT:USDT
-- XTZ/USDT:USDT
+- XAGUSD
+- USOIL
+- US500
+- US30
+- EURUSD
+- USTEC
+- USDCAD
 telegram:
   enabled: true
 time_analysis:

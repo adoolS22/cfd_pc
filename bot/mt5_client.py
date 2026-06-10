@@ -248,7 +248,9 @@ class MT5Client:
 
             info = mt5.symbol_info(mt5_symbol)
             if info is None:
-                # Wait briefly and retry — MT5 may need a moment after select
+                logger.error(f"DEBUG: MT5 symbol_info returned None for '{mt5_symbol}'. Terminal connected: {mt5.terminal_info().connected if mt5.terminal_info() else False}")
+                # Try selecting it
+                mt5.symbol_select(mt5_symbol, True)
                 import time as _t; _t.sleep(0.5)
                 info = mt5.symbol_info(mt5_symbol)
             if info is None:

@@ -164,7 +164,7 @@ Setup quality:
 - 60 to 69: WEAK
 - Below 60: INVALID
 
-Only return PLACE_BUY_LIMIT or PLACE_SELL_LIMIT if score >= 65.
+Only return PLACE_BUY_LIMIT or PLACE_SELL_LIMIT if the setup is clean and actionable.
 
 """
 
@@ -178,7 +178,7 @@ Return exactly this JSON structure:
 {
   "decision": "NO_TRADE | WAIT_FOR_SETUP | PLACE_BUY_LIMIT | PLACE_SELL_LIMIT | KEEP_PENDING_ORDER | CANCEL_PENDING_ORDER | MANAGE_OPEN_TRADE",
   "setup_quality": "HIGH | MEDIUM | WEAK | INVALID",
-  "score": 0,
+  "score": "integer_0_to_100",
   "market_bias": {
     "daily": "bullish | bearish | ranging | unclear",
     "h4": "bullish | bearish | ranging | unclear",
@@ -877,8 +877,8 @@ def plan_pending_order(
     ollama_base_url: str = "http://localhost:11434",
     ollama_model: str = "deepseek-r1:14b",
     timeout_seconds: int = 180,
-    min_rr: float = 2.0,
-    min_score: int = 65,
+    min_rr: float = 1.5,
+    min_score: int = 55,
     max_sl_pct: float = 3.0,
     temperature: float = 0.1,
     num_ctx: int = 12288,
@@ -947,7 +947,6 @@ def plan_pending_order(
         payload = {
             "model": ollama_model,
             "prompt": combined_prompt,
-            "format": "json",
             "stream": stream,
             "options": {
                 "temperature": temperature,
