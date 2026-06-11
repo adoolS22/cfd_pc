@@ -90,6 +90,20 @@ class OrderLifecycleManager:
         try:
             existing = mt5_client.get_pending_orders(symbol)
             if existing:
+                # Check if an almost identical order already exists
+                new_price = float(decision.entry_price or 0.0)
+                new_type_code = 2 if "BUY" in order_type.upper() else 3
+                
+                for order in existing:
+                    existing_price = float(order.get("price_open", 0.0))
+                    existing_type = order.get("type", -1)
+                    
+                    if existing_price > 0 and new_price > 0 and existing_type == new_type_code:
+                        diff_pct = abs(existing_price - new_price) / existing_price * 100.0
+                        if diff_pct < 0.1:  # Within 0.1% price difference
+                            logger.info(f"OrderManager: ⏸️ Skipping new {order_type} for {symbol}, similar order already exists at {existing_price} (diff {diff_pct:.3f}%)")
+                            return {"action": "skipped_duplicate", "symbol": symbol, "ticket": order.get("ticket")}
+                            
                 if len(existing) >= self.max_pending_per_symbol:
                     logger.info(
                         f"OrderManager: cancelling {len(existing)} existing order(s) for {symbol} "
