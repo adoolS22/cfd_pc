@@ -1011,18 +1011,26 @@ def guard_pending_orders(
         if ticket <= 0 or order_type not in (2, 3):
             continue
 
+        tp = float(order.get("tp") or 0)
         cancel_reason = None
         if news_reason:
             cancel_reason = f"High-impact news ahead: {news_reason}"
-        elif sl > 0:
+        else:
             # Use the order's own current market price (no symbol re-resolution:
             # the MT5 order symbol like 'ETHUSDm' would get uppercased and fail).
             price_now = float(order.get("price_current") or 0)
             if price_now > 0:
-                if order_type == 2 and price_now < sl:
+                # Structure broken: price already traded beyond the SL before fill.
+                if sl > 0 and order_type == 2 and price_now < sl:
                     cancel_reason = f"Structure broken: price {price_now} fell below SL {sl} before fill"
-                elif order_type == 3 and price_now > sl:
+                elif sl > 0 and order_type == 3 and price_now > sl:
                     cancel_reason = f"Structure broken: price {price_now} rose above SL {sl} before fill"
+                # Liquidity target reached before fill: the move happened without
+                # the pullback into the POI, so the setup is moot — cancel it.
+                elif tp > 0 and order_type == 2 and price_now >= tp:
+                    cancel_reason = f"Target {tp} reached before fill (price {price_now}); setup missed"
+                elif tp > 0 and order_type == 3 and price_now <= tp:
+                    cancel_reason = f"Target {tp} reached before fill (price {price_now}); setup missed"
 
         if not cancel_reason:
             continue

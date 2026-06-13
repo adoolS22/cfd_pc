@@ -19,6 +19,7 @@ from loguru import logger
 
 from .smc import (
     detect_unmitigated_fvgs,
+    detect_ifvgs,
     detect_order_blocks,
     detect_liquidity_sweeps,
     detect_structure_breaks,
@@ -66,6 +67,33 @@ def _rates_to_dataframe(rates: List[Dict[str, Any]]) -> pd.DataFrame:
     if "datetime" in df.columns:
         df.set_index("datetime", inplace=True, drop=False)
     return df
+
+
+def _compute_htf_liquidity(daily_df: pd.DataFrame) -> Dict[str, float]:
+    """Previous-day and previous-week high/low — the most obvious resting
+    liquidity (PDH/PDL buy-side, PWH/PWL sell-side analogues) that price draws to.
+
+    Computed from the daily dataframe (datetime indexed). The last bar is the
+    still-forming period, so the previous COMPLETED day/week is index -2.
+    """
+    out: Dict[str, float] = {}
+    if daily_df is None or daily_df.empty or "datetime" not in getattr(daily_df, "columns", []):
+        return out
+    try:
+        d = daily_df.resample("D").agg({"high": "max", "low": "min"}).dropna()
+        if len(d) >= 2:
+            out["pdh"] = float(d["high"].iloc[-2])
+            out["pdl"] = float(d["low"].iloc[-2])
+    except Exception:
+        pass
+    try:
+        w = daily_df.resample("W").agg({"high": "max", "low": "min"}).dropna()
+        if len(w) >= 2:
+            out["pwh"] = float(w["high"].iloc[-2])
+            out["pwl"] = float(w["low"].iloc[-2])
+    except Exception:
+        pass
+    return out
 
 
 def _detect_swing_levels(df: pd.DataFrame, lookback: int = 5) -> Dict[str, List[float]]:
@@ -254,6 +282,13 @@ def _analyze_single_timeframe(
     except Exception:
         result["order_blocks"] = []
 
+    # Inversion FVGs (breaker-style POIs: a mitigated FVG that flipped polarity)
+    try:
+        ifvgs = detect_ifvgs(df_ind, lookback=100)
+        result["ifvgs"] = [_fvg_to_dict(f) for f in ifvgs[:5]]
+    except Exception:
+        result["ifvgs"] = []
+
     # Structure Breaks (BOS, CHOCH) — body-close only, per SMC methodology
     try:
         breaks = detect_structure_breaks(df_ind, lookback=50, require_body_close=True)
@@ -325,14 +360,23 @@ def collect_mtf_analysis(
     }
 
     # Collect and analyze each timeframe
+    daily_df = None
     for tf, count, key in _TIMEFRAMES:
         try:
             rates = mt5_client.get_rates(symbol, tf, count)
             df = _rates_to_dataframe(rates)
+            if key == "daily":
+                daily_df = df
             result[key] = _analyze_single_timeframe(df, current_price, key)
         except Exception as e:
             logger.debug(f"MTF collector [{symbol}] {key}: {e}")
             result[key] = {"timeframe": key, "error": str(e)}
+
+    # Previous day/week high & low — explicit draw-on-liquidity targets.
+    try:
+        result["htf_liquidity"] = _compute_htf_liquidity(daily_df)
+    except Exception:
+        result["htf_liquidity"] = {}
 
     # Attach existing orders and positions context
     result["existing_pending_orders"] = _simplify_orders(existing_pending_orders or [])

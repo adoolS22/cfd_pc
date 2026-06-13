@@ -451,8 +451,9 @@ def _evaluate_confluence(
     if not dir_breaks:
         return None
 
-    # 4) Fresh POI (FVG/OB) in the trade direction, created by the post-sweep
-    #    move, sitting in the retracement zone relative to current price.
+    # 4) Fresh POI (FVG / OB / breaker iFVG) in the trade direction, created by
+    #    the post-sweep move, sitting in the retracement zone vs current price.
+    ifvgs = tf_data.get("ifvgs", []) or []
     candidates: List[Dict[str, Any]] = []
     for f in fvgs:
         if str(f.get("direction", "")).startswith(prefix) and not f.get("mitigated"):
@@ -460,6 +461,10 @@ def _evaluate_confluence(
     for o in obs:
         if str(o.get("direction", "")).startswith(prefix):
             candidates.append({**o, "type": "OB"})
+    for f in ifvgs:
+        # iFVG already carries the FLIPPED direction (acts from the opposite side)
+        if str(f.get("direction", "")).startswith(prefix):
+            candidates.append({**f, "type": "breaker"})
 
     valid: List[Dict[str, Any]] = []
     for p in candidates:
@@ -683,9 +688,22 @@ def extract_htf_context(mtf_data: Dict[str, Any]) -> Dict[str, Any]:
         loc = dr_h1.get("location", "unknown")
     summary["premium_discount"]["current_location"] = loc
 
-    # 3. Liquidity (Nearest HTF levels & sweeps)
-    h4_bsl = h4.get("bsl_levels", []) or h1.get("bsl_levels", [])
-    h4_ssl = h4.get("ssl_levels", []) or h1.get("ssl_levels", [])
+    # 3. Liquidity (swing levels + explicit previous day/week high/low).
+    #    PDH/PWH are buy-side liquidity (BSL targets); PDL/PWL are sell-side (SSL).
+    h4_bsl = list(h4.get("bsl_levels", []) or h1.get("bsl_levels", []))
+    h4_ssl = list(h4.get("ssl_levels", []) or h1.get("ssl_levels", []))
+    htf_liq = mtf_data.get("htf_liquidity", {}) or {}
+    for k in ("pdh", "pwh"):
+        v = htf_liq.get(k)
+        if v:
+            h4_bsl.append(float(v))
+    for k in ("pdl", "pwl"):
+        v = htf_liq.get(k)
+        if v:
+            h4_ssl.append(float(v))
+    # De-duplicate while keeping order
+    h4_bsl = sorted(set(round(float(x), 6) for x in h4_bsl if x))
+    h4_ssl = sorted(set(round(float(x), 6) for x in h4_ssl if x))
     summary["liquidity"]["nearest_bsl"] = h4_bsl
     summary["liquidity"]["nearest_ssl"] = h4_ssl
     

@@ -164,6 +164,73 @@ c5 = pl.build_candidate_order(m, min_rr=1.5)
 check("falls back to m5 setup", c5 is not None and c5["poi_timeframe"] == "m5", str(c5))
 
 
+# ── #3: PDH/PDL feed liquidity targets; iFVG (breaker) is a valid POI ────
+# Remove swing BSL so the only target is the previous-day high (pdh).
+m = base_mtf()
+m["h4"]["bsl_levels"] = []
+m["htf_liquidity"] = {"pdh": 104.5, "pdl": 90.0}
+c_pdh = pl.build_candidate_order(m, min_rr=1.5)
+check("PDH used as buy-side target", c_pdh is not None and abs(c_pdh["take_profit_1"] - 104.5) < 1e-6, str(c_pdh))
+
+# iFVG as the only POI (no plain FVG) -> still a valid setup.
+m = base_mtf()
+m["m15"]["fvgs"] = []
+m["m15"]["ifvgs"] = [{"direction": "bullish", "top": 98.0, "bottom": 97.0, "midpoint": 97.5,
+                      "mitigated": False, "index": 15, "inverted": True}]
+c_brk = pl.build_candidate_order(m, min_rr=1.5)
+check("breaker (iFVG) qualifies as POI", c_brk is not None and c_brk["poi_type"] == "breaker", str(c_brk))
+
+
+# ── #2: guard cancels a pending order when the target is hit before fill ──
+import types
+import main
+
+
+def _make_client(order, tick_price):
+    class C:
+        def get_pending_orders(self, symbol=None):
+            return [order]
+        def get_tick(self, s):
+            return {"bid": tick_price, "ask": tick_price}
+        def cancel_pending_order(self, t):
+            cancelled.append(t)
+            return True
+    return C()
+
+
+cfg = types.SimpleNamespace(pending_order_planner={"news_guard_enabled": False})
+
+
+class _Storage:
+    def update_pending_order_status(self, *a, **k):
+        pass
+
+
+# BUY_LIMIT (type 2): entry 98, tp 104, SL 95. Price ran to 104 (>= tp) before fill -> cancel.
+cancelled = []
+order = {"ticket": 1, "symbol": "X", "type": 2, "sl": 95.0, "tp": 104.0, "price_current": 104.2}
+main.guard_pending_orders(_Storage(), None, _make_client(order, 104.2), cfg)
+check("BUY_LIMIT cancelled when target hit before fill", cancelled == [1], str(cancelled))
+
+# Price still between SL and TP -> keep.
+cancelled = []
+order = {"ticket": 2, "symbol": "X", "type": 2, "sl": 95.0, "tp": 104.0, "price_current": 99.0}
+main.guard_pending_orders(_Storage(), None, _make_client(order, 99.0), cfg)
+check("BUY_LIMIT kept while price between SL and TP", cancelled == [], str(cancelled))
+
+# SELL_LIMIT (type 3): entry 102, tp 96, SL 105. Price ran to 96 (<= tp) before fill -> cancel.
+cancelled = []
+order = {"ticket": 3, "symbol": "X", "type": 3, "sl": 105.0, "tp": 96.0, "price_current": 95.8}
+main.guard_pending_orders(_Storage(), None, _make_client(order, 95.8), cfg)
+check("SELL_LIMIT cancelled when target hit before fill", cancelled == [3], str(cancelled))
+
+# Structure break still cancels (price beyond SL).
+cancelled = []
+order = {"ticket": 4, "symbol": "X", "type": 2, "sl": 95.0, "tp": 104.0, "price_current": 94.5}
+main.guard_pending_orders(_Storage(), None, _make_client(order, 94.5), cfg)
+check("BUY_LIMIT cancelled on structure break (price below SL)", cancelled == [4], str(cancelled))
+
+
 print()
 print(f"PASSED: {len(passed)}  FAILED: {len(failed)}")
 if failed:
