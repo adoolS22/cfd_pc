@@ -406,7 +406,12 @@ def detect_order_blocks(df: pd.DataFrame, lookback: int = 50) -> List[OrderBlock
     return filter_pd_array_obs(final_obs, df)
 
 
-def detect_liquidity_sweeps(df: pd.DataFrame, lookback: int = 30, min_wick_pct: float = 0.05) -> List[LiquiditySweep]:
+def detect_liquidity_sweeps(
+    df: pd.DataFrame,
+    lookback: int = 30,
+    min_wick_pct: float = 0.05,
+    scan_last: int = 1,
+) -> List[LiquiditySweep]:
     """
     Detect Liquidity Sweeps (Stop hunts / Turtle Soups).
     Occurs when price wicks past a significant previous swing high/low
@@ -418,8 +423,14 @@ def detect_liquidity_sweeps(df: pd.DataFrame, lookback: int = 30, min_wick_pct: 
       eliminates insignificant micro-wicks that are just noise
     - Wick size >= 50% of candle body — ensures the sweep was a real aggressive
       move, not a small spike on a large body candle
+
+    scan_last: how many of the most recent candles to test for a sweep. The
+    default of 1 only flags a sweep on the very last candle (legacy behaviour).
+    A larger window returns every sweep in that window with its bar index, so a
+    multi-step confluence (sweep -> displacement -> shift -> retracement) can
+    reference a sweep that happened several candles earlier.
     """
-    sweeps = []
+    sweeps: List[LiquiditySweep] = []
     if len(df) < lookback + 5:
         return sweeps
 
@@ -437,46 +448,38 @@ def detect_liquidity_sweeps(df: pd.DataFrame, lookback: int = 30, min_wick_pct: 
            l < df['low'].iloc[i+1] and l < df['low'].iloc[i+2]:
             swing_lows.append((i, float(l)))
 
-    # Scan the last 3 candles to see if they swept any of these levels
-    recent_idx = len(df) - 1
-    recent_cand = df.iloc[recent_idx]
-    candle_body = abs(float(recent_cand['close']) - float(recent_cand['open']))
+    start = max(2, len(df) - max(1, scan_last))
+    for j in range(start, len(df)):
+        cand = df.iloc[j]
+        candle_body = abs(float(cand['close']) - float(cand['open']))
 
-    # Bearish Sweep: price wicked above a swing high but closed below it
-    for sh_idx, sh_price in swing_highs[-10:]:
-        if sh_idx < recent_idx - 3:  # Ensure it's not the same candle complex
-            if recent_cand['high'] > sh_price and recent_cand['close'] < sh_price:
-                wick_size = float(recent_cand['high']) - sh_price  # pierce above the swing
-                min_wick = sh_price * (min_wick_pct / 100)
-                # Filter: wick must be meaningful in size AND significant vs candle body
-                if wick_size >= min_wick and (candle_body == 0 or wick_size >= candle_body * 0.5):
-                    kz = get_killzone_session(df.index[-1])
-                    sweeps.append(LiquiditySweep(
-                        direction='bearish',
-                        swept_price=sh_price,
-                        timestamp=df.index[-1],
-                        index=recent_idx,
-                        killzone=kz
-                    ))
-                    break
+        # Bearish Sweep: candle wicked above a prior swing high but closed below it
+        for sh_idx, sh_price in swing_highs:
+            if sh_idx <= j - 3:  # swing confirmed before this candle
+                if cand['high'] > sh_price and cand['close'] < sh_price:
+                    wick_size = float(cand['high']) - sh_price
+                    min_wick = sh_price * (min_wick_pct / 100)
+                    if wick_size >= min_wick and (candle_body == 0 or wick_size >= candle_body * 0.5):
+                        sweeps.append(LiquiditySweep(
+                            direction='bearish', swept_price=sh_price,
+                            timestamp=df.index[j], index=j,
+                            killzone=get_killzone_session(df.index[j]),
+                        ))
+                        break
 
-    # Bullish Sweep: price wicked below a swing low but closed above it
-    for sl_idx, sl_price in swing_lows[-10:]:
-        if sl_idx < recent_idx - 3:
-            if recent_cand['low'] < sl_price and recent_cand['close'] > sl_price:
-                wick_size = sl_price - float(recent_cand['low'])  # pierce below the swing
-                min_wick = sl_price * (min_wick_pct / 100)
-                # Filter: wick must be meaningful in size AND significant vs candle body
-                if wick_size >= min_wick and (candle_body == 0 or wick_size >= candle_body * 0.5):
-                    kz = get_killzone_session(df.index[-1])
-                    sweeps.append(LiquiditySweep(
-                        direction='bullish',
-                        swept_price=sl_price,
-                        timestamp=df.index[-1],
-                        index=recent_idx,
-                        killzone=kz
-                    ))
-                    break
+        # Bullish Sweep: candle wicked below a prior swing low but closed above it
+        for sl_idx, sl_price in swing_lows:
+            if sl_idx <= j - 3:
+                if cand['low'] < sl_price and cand['close'] > sl_price:
+                    wick_size = sl_price - float(cand['low'])
+                    min_wick = sl_price * (min_wick_pct / 100)
+                    if wick_size >= min_wick and (candle_body == 0 or wick_size >= candle_body * 0.5):
+                        sweeps.append(LiquiditySweep(
+                            direction='bullish', swept_price=sl_price,
+                            timestamp=df.index[j], index=j,
+                            killzone=get_killzone_session(df.index[j]),
+                        ))
+                        break
 
     return sweeps
 
@@ -634,6 +637,55 @@ def detect_displacement(
                 )
 
     return None
+
+
+def detect_displacements(
+    df: pd.DataFrame,
+    lookback: int = 30,
+    min_atr_mult: float = 1.5,
+    min_body_ratio: float = 0.65,
+) -> List[Displacement]:
+    """Return ALL qualifying single-candle displacements in the recent window.
+
+    Unlike detect_displacement (which returns only the most recent), this lets a
+    multi-step confluence locate the impulse leg in the bias direction even when
+    the latest displacement is the counter-bias pullback into the POI.
+    """
+    results: List[Displacement] = []
+    if len(df) < 14:
+        return results
+
+    if 'atr_14' in df.columns:
+        atr = float(df['atr_14'].iloc[-1])
+    else:
+        tr_series = pd.concat([
+            df['high'] - df['low'],
+            (df['high'] - df['close'].shift(1)).abs(),
+            (df['low'] - df['close'].shift(1)).abs(),
+        ], axis=1).max(axis=1)
+        atr = float(tr_series.rolling(14).mean().iloc[-1])
+    if atr <= 0:
+        return results
+
+    start = max(0, len(df) - lookback)
+    for i in range(start, len(df)):
+        c = df.iloc[i]
+        body = abs(float(c['close']) - float(c['open']))
+        total_range = float(c['high']) - float(c['low'])
+        if total_range <= 0:
+            continue
+        body_ratio = body / total_range
+        magnitude = total_range / atr
+        if magnitude >= min_atr_mult and body_ratio >= min_body_ratio:
+            results.append(Displacement(
+                direction='bullish' if float(c['close']) > float(c['open']) else 'bearish',
+                magnitude_atr=round(magnitude, 2),
+                body_ratio=round(body_ratio, 2),
+                start_index=i,
+                end_index=i,
+                timestamp=df.index[i],
+            ))
+    return results
 
 
 # =============================================================================

@@ -23,6 +23,7 @@ from .smc import (
     detect_liquidity_sweeps,
     detect_structure_breaks,
     detect_displacement,
+    detect_displacements,
     get_dealing_range,
     FVG,
     OrderBlock,
@@ -100,6 +101,7 @@ def _fvg_to_dict(fvg: FVG) -> Dict[str, Any]:
         "bottom": round(float(fvg.bottom), 5),
         "midpoint": round((float(fvg.top) + float(fvg.bottom)) / 2, 5),
         "mitigated": fvg.mitigated,
+        "index": int(fvg.index),
     }
 
 
@@ -109,6 +111,7 @@ def _ob_to_dict(ob: OrderBlock) -> Dict[str, Any]:
         "top": round(float(ob.top), 5),
         "bottom": round(float(ob.bottom), 5),
         "midpoint": round((float(ob.top) + float(ob.bottom)) / 2, 5),
+        "index": int(ob.index),
     }
 
 
@@ -117,15 +120,19 @@ def _sweep_to_dict(sweep: LiquiditySweep) -> Dict[str, Any]:
         "direction": sweep.direction,
         "swept_price": round(float(sweep.swept_price), 5),
         "killzone": sweep.killzone,
+        "index": int(sweep.index),
     }
 
 
 def _sb_to_dict(sb: StructureBreak) -> Dict[str, Any]:
+    # detect_structure_breaks is called with require_body_close=True, so every
+    # break here is a body-close break (body_close is implied True).
     return {
         "break_type": sb.break_type,
         "direction": sb.direction,
-        "price": round(float(sb.price), 5),
-        "body_close": getattr(sb, "body_close", True),
+        "price": round(float(sb.broken_price), 5),
+        "body_close": True,
+        "index": int(sb.index),
     }
 
 
@@ -134,8 +141,10 @@ def _displacement_to_dict(disp: Optional[Displacement]) -> Optional[Dict[str, An
         return None
     return {
         "direction": disp.direction,
-        "atr_multiple": round(float(disp.atr_multiple), 2),
+        "atr_multiple": round(float(disp.magnitude_atr), 2),
         "body_ratio": round(float(disp.body_ratio), 2),
+        "start_index": int(disp.start_index),
+        "end_index": int(disp.end_index),
     }
 
 
@@ -245,24 +254,31 @@ def _analyze_single_timeframe(
     except Exception:
         result["order_blocks"] = []
 
-    # Structure Breaks (BOS, CHOCH, MSS)
+    # Structure Breaks (BOS, CHOCH) — body-close only, per SMC methodology
     try:
-        breaks = detect_structure_breaks(df_ind, lookback=50)
+        breaks = detect_structure_breaks(df_ind, lookback=50, require_body_close=True)
         result["structure_breaks"] = [_sb_to_dict(sb) for sb in breaks[:5]]
     except Exception:
         result["structure_breaks"] = []
 
-    # Displacement
+    # Displacement — keep the latest (for summaries) plus the full recent list
+    # so the confluence can find the bias-direction impulse behind a pullback.
     try:
         disp = detect_displacement(df_ind, lookback=30)
         result["displacement"] = _displacement_to_dict(disp)
     except Exception:
         result["displacement"] = None
-
-    # Liquidity Sweeps
     try:
-        sweeps = detect_liquidity_sweeps(df_ind, lookback=30)
-        result["liquidity_sweeps"] = [_sweep_to_dict(s) for s in sweeps[:5]]
+        disps = detect_displacements(df_ind, lookback=30)
+        result["displacements"] = [_displacement_to_dict(d) for d in disps]
+    except Exception:
+        result["displacements"] = []
+
+    # Liquidity Sweeps — scan a recent window (not just the last candle) so the
+    # confluence chain can reference a sweep that happened several bars ago.
+    try:
+        sweeps = detect_liquidity_sweeps(df_ind, lookback=30, scan_last=60)
+        result["liquidity_sweeps"] = [_sweep_to_dict(s) for s in sweeps[-10:]]
     except Exception:
         result["liquidity_sweeps"] = []
 

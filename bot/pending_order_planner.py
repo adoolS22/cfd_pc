@@ -381,21 +381,138 @@ about whether to take that trade, as a JSON object with EXACTLY these four keys:
 """
 
 
+def _evaluate_confluence(
+    tf_data: Dict[str, Any],
+    current_price: float,
+    direction: str,
+    min_disp_atr: float,
+    min_disp_body: float,
+) -> Optional[Dict[str, Any]]:
+    """Validate the SMC confluence chain on one timeframe for a trade direction.
+
+    Required sequence (enforced by bar index ordering):
+      liquidity sweep (in trade direction) -> displacement (trade direction,
+      after the sweep) -> body-close structure break (trade direction, after the
+      sweep) -> a fresh FVG/OB created by that move, sitting in the retracement
+      zone between the swept extreme and current price.
+
+    direction: 'bullish' (long) or 'bearish' (short).
+    Returns the validated setup (poi + swept extreme + evidence) or None.
+    """
+    prefix = "bull" if direction == "bullish" else "bear"
+    sweeps = tf_data.get("liquidity_sweeps", []) or []
+    breaks = tf_data.get("structure_breaks", []) or []
+    fvgs = tf_data.get("fvgs", []) or []
+    obs = tf_data.get("order_blocks", []) or []
+
+    # Displacement list (fall back to the single 'displacement' for callers/tests
+    # that don't provide the list).
+    disps = tf_data.get("displacements")
+    if disps is None:
+        d1 = tf_data.get("displacement")
+        disps = [d1] if d1 else []
+
+    # 1) A strong displacement (impulse) in the trade direction. Use the most
+    #    recent qualifying one — at a pullback entry the LATEST move is often the
+    #    counter-bias retracement, so we must search the whole window, not just
+    #    the last displacement.
+    dir_disps = [
+        d for d in disps
+        if d and str(d.get("direction", "")) == direction
+        and float(d.get("atr_multiple") or 0) >= min_disp_atr
+        and float(d.get("body_ratio") or 0) >= min_disp_body
+    ]
+    if not dir_disps:
+        return None
+    disp = max(dir_disps, key=lambda d: int(d.get("end_index", 0)))
+    disp_end = int(disp.get("end_index", -1))
+
+    # 2) A liquidity sweep in the trade direction that PRECEDES the displacement.
+    #    Bullish sweep took out the lows (SSL) -> fuel for a long; bearish sweep
+    #    took out the highs (BSL) -> fuel for a short. Pick the most recent sweep
+    #    at or before the displacement so a later wick doesn't void the setup.
+    dir_sweeps = [
+        s for s in sweeps
+        if str(s.get("direction", "")) == direction
+        and float(s.get("swept_price") or 0) > 0
+        and int(s.get("index", 10**9)) <= disp_end
+    ]
+    if not dir_sweeps:
+        return None
+    sweep = max(dir_sweeps, key=lambda s: int(s.get("index", 0)))
+    sweep_idx = int(sweep.get("index", 0))
+    sweep_price = float(sweep["swept_price"])
+
+    # 3) Body-close structure break (BOS/CHoCH) in the trade direction, after the sweep.
+    dir_breaks = [
+        b for b in breaks
+        if str(b.get("direction", "")) == direction and int(b.get("index", -1)) >= sweep_idx
+    ]
+    if not dir_breaks:
+        return None
+
+    # 4) Fresh POI (FVG/OB) in the trade direction, created by the post-sweep
+    #    move, sitting in the retracement zone relative to current price.
+    candidates: List[Dict[str, Any]] = []
+    for f in fvgs:
+        if str(f.get("direction", "")).startswith(prefix) and not f.get("mitigated"):
+            candidates.append({**f, "type": "FVG"})
+    for o in obs:
+        if str(o.get("direction", "")).startswith(prefix):
+            candidates.append({**o, "type": "OB"})
+
+    valid: List[Dict[str, Any]] = []
+    for p in candidates:
+        top = float(p.get("top") or 0)
+        bottom = float(p.get("bottom") or 0)
+        if not (top > bottom > 0):
+            continue
+        if int(p.get("index", -1)) < sweep_idx:
+            continue  # POI must come from the post-sweep move
+        if direction == "bullish":
+            if top < current_price and bottom > sweep_price:
+                valid.append(p)
+        else:
+            if bottom > current_price and top < sweep_price:
+                valid.append(p)
+    if not valid:
+        return None
+
+    # Shallowest pullback = best location (closest to current price)
+    poi = max(valid, key=lambda p: float(p["top"])) if direction == "bullish" \
+        else min(valid, key=lambda p: float(p["bottom"]))
+
+    return {
+        "direction": direction,
+        "poi": poi,
+        "sweep_price": sweep_price,
+        "sweep_index": sweep_idx,
+        "displacement": disp,
+        "structure_break": dir_breaks[-1],
+    }
+
+
 def build_candidate_order(
     mtf_data: Dict[str, Any],
-    min_rr: float = 1.5,
+    min_rr: float = 2.0,
     atr_buffer_mult: float = 0.25,
     min_stop_atr_mult: float = 0.5,
     max_rr: float = 10.0,
+    max_sl_pct: float = 5.0,
+    setup_timeframes: tuple = ("m15", "m5"),
+    min_disp_atr: float = 1.5,
+    min_disp_body: float = 0.65,
+    enforce_premium_discount: bool = True,
 ) -> Optional[Dict[str, Any]]:
-    """Deterministically price a pending-order candidate from the SMC analysis.
+    """Deterministically price a pending-order candidate that satisfies the full
+    SMC confluence story (sweep -> displacement -> structure shift -> retracement
+    into a fresh POI), aligned with HTF bias and premium/discount.
 
-    Entry = near edge of the freshest unmitigated POI in the bias direction.
-    SL = far edge of the POI plus an ATR buffer, but never tighter than
-         min_stop_atr_mult * ATR (so a microscopic POI can't create a stop that
-         gets wicked out instantly with an absurd R:R).
-    TP1 = nearest HTF liquidity level giving at least min_rr.
-    Returns None when no valid candidate exists (code-side rejection).
+    Entry  = near edge of the validated POI (pullback into the zone).
+    SL     = behind the swept extreme (the real invalidation), ATR-buffered and
+             floored, capped at max_sl_pct.
+    TP1    = nearest HTF liquidity giving min_rr <= RR <= max_rr.
+    Returns None when no setup satisfies every gate (code-side rejection).
     """
     ctx = extract_htf_context(mtf_data)
     current_price = float(mtf_data.get("current_price", 0) or 0)
@@ -406,9 +523,37 @@ def build_candidate_order(
     if bias not in ("bullish", "bearish"):
         return None
 
-    # ATR for the SL buffer: prefer execution TF, fall back to higher TFs
+    # HTF dealing-range equilibrium for the premium/discount check (applied to the
+    # ENTRY, not the current price — a pending order fills at the POI, so its
+    # location is what must be in discount (buy) / premium (sell)).
+    equilibrium = 0.0
+    for tf in ("h4", "h1"):
+        dr = (mtf_data.get(tf, {}) or {}).get("dealing_range", {}) or {}
+        eq = dr.get("equilibrium")
+        if eq:
+            equilibrium = float(eq)
+            break
+
+    # Find a confluence setup on the configured setup timeframes (finest first).
+    setup = None
+    setup_tf = None
+    for tf in setup_timeframes:
+        tf_data = mtf_data.get(tf) or {}
+        if not tf_data:
+            continue
+        s = _evaluate_confluence(tf_data, current_price, bias, min_disp_atr, min_disp_body)
+        if s:
+            setup, setup_tf = s, tf
+            break
+    if not setup:
+        return None
+
+    poi = setup["poi"]
+    sweep_price = float(setup["sweep_price"])
+
+    # ATR for the SL buffer: prefer the setup timeframe, then fall back.
     atr = 0.0
-    for tf in ("m15", "h1", "h4"):
+    for tf in (setup_tf, "m15", "h1", "h4"):
         try:
             v = float(mtf_data.get(tf, {}).get("atr") or 0)
         except (TypeError, ValueError):
@@ -419,74 +564,57 @@ def build_candidate_order(
     if atr <= 0:
         atr = current_price * 0.001
 
-    pois = [
-        p for p in ctx.get("poi_candidates", [])
-        if p.get("valid") and not p.get("mitigated")
-        and float(p.get("top") or 0) > float(p.get("bottom") or 0) > 0
-    ]
     liquidity = ctx.get("liquidity", {})
+    min_stop_dist = atr * min_stop_atr_mult
 
     if bias == "bullish":
-        # Pullback entry: nearest bullish POI fully below current price
-        candidates = [
-            p for p in pois
-            if str(p.get("direction", "")).startswith("bull")
-            and float(p["top"]) < current_price
-        ]
-        if not candidates:
-            return None
-        poi = max(candidates, key=lambda p: float(p["top"]))
+        order_type = "BUY_LIMIT"
         entry = float(poi["top"])
-        stop_loss = float(poi["bottom"]) - atr * atr_buffer_mult
-        # Floor the stop distance so a tiny POI can't produce a wick-out stop
-        min_stop_dist = atr * min_stop_atr_mult
+        location = "discount" if (equilibrium and entry <= equilibrium) else "premium"
+        stop_loss = sweep_price - atr * atr_buffer_mult  # behind real invalidation
         if entry - stop_loss < min_stop_dist:
             stop_loss = entry - min_stop_dist
         risk = entry - stop_loss
         if risk <= 0:
             return None
         targets = sorted(
-            float(x) for x in liquidity.get("nearest_bsl", [])
-            if float(x or 0) > entry
+            float(x) for x in liquidity.get("nearest_bsl", []) if float(x or 0) > entry
         )
-        order_type = "BUY_LIMIT"
     else:
-        candidates = [
-            p for p in pois
-            if str(p.get("direction", "")).startswith("bear")
-            and float(p["bottom"]) > current_price
-        ]
-        if not candidates:
-            return None
-        poi = min(candidates, key=lambda p: float(p["bottom"]))
+        order_type = "SELL_LIMIT"
         entry = float(poi["bottom"])
-        stop_loss = float(poi["top"]) + atr * atr_buffer_mult
-        # Floor the stop distance so a tiny POI can't produce a wick-out stop
-        min_stop_dist = atr * min_stop_atr_mult
+        location = "premium" if (equilibrium and entry >= equilibrium) else "discount"
+        stop_loss = sweep_price + atr * atr_buffer_mult
         if stop_loss - entry < min_stop_dist:
             stop_loss = entry + min_stop_dist
         risk = stop_loss - entry
         if risk <= 0:
             return None
         targets = sorted(
-            (float(x) for x in liquidity.get("nearest_ssl", [])
-             if 0 < float(x or 0) < entry),
+            (float(x) for x in liquidity.get("nearest_ssl", []) if 0 < float(x or 0) < entry),
             reverse=True,
         )
-        order_type = "SELL_LIMIT"
+
+    # Premium/Discount gate on the ENTRY: buy only in discount, sell only in
+    # premium. Skipped when the HTF equilibrium is unavailable.
+    if enforce_premium_discount and equilibrium > 0:
+        if order_type == "BUY_LIMIT" and entry > equilibrium:
+            return None
+        if order_type == "SELL_LIMIT" and entry < equilibrium:
+            return None
+
+    # Reject setups whose real-invalidation stop is too wide.
+    if entry > 0 and (risk / entry) * 100.0 > max_sl_pct:
+        return None
 
     # TP1 = nearest liquidity target with min_rr <= RR <= max_rr.
-    # An RR above max_rr means the target is unrealistically far relative to the
-    # stop; cap TP1 at max_rr * risk so the target stays plausible.
     tp1 = None
     tp2 = None
     for i, target in enumerate(targets):
         rr = abs(target - entry) / risk
         if rr >= min_rr:
-            if rr > max_rr:
-                tp1 = entry + risk * max_rr if order_type == "BUY_LIMIT" else entry - risk * max_rr
-            else:
-                tp1 = target
+            tp1 = (entry + risk * max_rr if order_type == "BUY_LIMIT" else entry - risk * max_rr) \
+                if rr > max_rr else target
             if i + 1 < len(targets):
                 tp2 = targets[i + 1]
             break
@@ -495,6 +623,7 @@ def build_candidate_order(
     if tp2 is None:
         tp2 = entry + risk * 3.0 if order_type == "BUY_LIMIT" else entry - risk * 3.0
 
+    sb = setup.get("structure_break", {}) or {}
     return {
         "order_type": order_type,
         "entry_price": round(entry, 5),
@@ -503,10 +632,13 @@ def build_candidate_order(
         "take_profit_2": round(float(tp2), 5),
         "risk_to_reward": round(abs(tp1 - entry) / risk, 2),
         "bias": bias,
+        "location": location,
         "poi_type": str(poi.get("type", "")),
-        "poi_timeframe": str(poi.get("timeframe", "")),
+        "poi_timeframe": str(setup_tf or ""),
         "poi_zone_low": round(float(poi["bottom"]), 5),
         "poi_zone_high": round(float(poi["top"]), 5),
+        "sweep_price": round(sweep_price, 5),
+        "structure_break": f"{sb.get('break_type', '')} {sb.get('direction', '')}".strip(),
         "atr_used": round(atr, 5),
     }
 
@@ -1063,9 +1195,9 @@ def plan_pending_order(
     ollama_base_url: str = "http://localhost:11434",
     ollama_model: str = "deepseek-r1:14b",
     timeout_seconds: int = 180,
-    min_rr: float = 1.5,
+    min_rr: float = 2.0,
     min_score: int = 55,
-    max_sl_pct: float = 3.0,
+    max_sl_pct: float = 5.0,
     temperature: float = 0.1,
     num_ctx: int = 12288,
     num_predict: int = 2048,
@@ -1073,6 +1205,7 @@ def plan_pending_order(
     stream: bool = False,
     keep_alive: str = "30m",
     learning_context: str = "",
+    confluence_cfg: Optional[Dict[str, Any]] = None,
 ) -> PendingOrderDecision:
     """
     Evaluates MTF SMC data and decides if a pending order should be placed.
@@ -1112,15 +1245,28 @@ def plan_pending_order(
         
     logger.info(f"[PREFILTER_PASS] {symbol} Passed prefilter. reason={reason}")
 
-    # Code-first pricing: the code computes the order, the LLM only approves/rejects
-    proposal = build_candidate_order(mtf_data, min_rr=min_rr)
+    # Code-first pricing: the code computes the order (full SMC confluence chain),
+    # the LLM only approves/rejects.
+    cc = confluence_cfg or {}
+    proposal = build_candidate_order(
+        mtf_data,
+        min_rr=min_rr,
+        max_sl_pct=max_sl_pct,
+        atr_buffer_mult=float(cc.get("sl_buffer_atr_mult", 0.25)),
+        min_stop_atr_mult=float(cc.get("min_stop_atr_mult", 0.5)),
+        max_rr=float(cc.get("max_rr", 10.0)),
+        setup_timeframes=tuple(cc.get("setup_timeframes", ("m15", "m5"))),
+        min_disp_atr=float(cc.get("min_displacement_atr", 1.5)),
+        min_disp_body=float(cc.get("min_displacement_body_ratio", 0.65)),
+        enforce_premium_discount=bool(cc.get("enforce_premium_discount", True)),
+    )
     if proposal is None:
-        logger.info(f"[CODE_PRICER] {symbol}: no valid code-priced candidate, skipping LLM")
+        logger.info(f"[CODE_PRICER] {symbol}: no confluence setup (sweep->displacement->shift->POI), skipping LLM")
         return PendingOrderDecision(
             decision="NO_TRADE",
             symbol=symbol,
             setup_quality="INVALID",
-            reason="No code-priced candidate (no fresh POI in bias direction with adequate R:R)",
+            reason="No confluence setup: needs sweep + displacement + structure shift + fresh POI in bias direction",
         )
     logger.info(
         f"[CODE_PRICER] {symbol}: {proposal['order_type']} entry={proposal['entry_price']} "
@@ -1165,8 +1311,10 @@ def plan_pending_order(
             f"Direction: {proposal['order_type']}\n"
             f"Entry: {proposal['entry_price']} | Stop: {proposal['stop_loss']} | "
             f"Target: {proposal['take_profit_1']} | R:R: {proposal['risk_to_reward']}\n"
-            f"Setup: {proposal['poi_type']} on {proposal['poi_timeframe']} timeframe, "
-            f"bias is {proposal['bias']}\n"
+            f"Setup: {proposal['poi_type']} on {proposal.get('poi_timeframe')} timeframe, "
+            f"bias is {proposal['bias']}, location {proposal.get('location')}\n"
+            f"Confluence: swept liquidity at {proposal.get('sweep_price')}, "
+            f"structure break {proposal.get('structure_break')} (stop sits behind the swept extreme)\n"
         )
         combined_prompt = f"{SMC_VETO_PROMPT}\n\n[MARKET DATA]\n{user_content}{proposal_block}{learning_block}{SMC_VETO_REQUEST}"
         

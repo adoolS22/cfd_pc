@@ -144,23 +144,30 @@ def fake_post(url, json=None, timeout=None):
 
 import requests as real_requests
 orig_post = real_requests.post
-orig_classify = pl.classify_symbol_fast
 real_requests.post = fake_post
-pl.classify_symbol_fast = lambda mtf: ("LLM_CANDIDATE", "test bypass")
 try:
-    # Realistic mtf_data so the code-first pricer produces a candidate and the
-    # LLM (and thus the learning context) is actually reached.
+    # Confluence-complete bearish setup so the code pricer produces a candidate
+    # and the LLM (and thus the learning context) is actually reached.
     mtf = {
         "symbol": "XAUUSD", "current_price": 2400.0, "spread": 0.3,
         "daily": {"trend": "down"},
-        "h4": {
-            "trend": "down", "atr": 5.0,
-            "bsl_levels": [], "ssl_levels": [2360.0, 2350.0],
-            "fvgs": [{"direction": "bearish", "top": 2412.0, "bottom": 2410.0,
-                      "midpoint": 2411.0, "mitigated": False}],
-            "order_blocks": [], "dealing_range": {"location": "premium"},
+        "h4": {"trend": "down", "atr": 5.0, "bsl_levels": [], "ssl_levels": [2360.0, 2350.0],
+               "dealing_range": {"location": "premium", "equilibrium": 2405.0},
+               "fvgs": [], "order_blocks": [], "structure_breaks": [], "displacement": None,
+               "liquidity_sweeps": []},
+        "h1": {"dealing_range": {"location": "premium", "equilibrium": 2405.0}},
+        "m15": {
+            "atr": 5.0,
+            "liquidity_sweeps": [{"direction": "bearish", "swept_price": 2420.0, "index": 10, "killzone": "NewYork"}],
+            "displacement": {"direction": "bearish", "atr_multiple": 2.0, "body_ratio": 0.8,
+                             "start_index": 11, "end_index": 12},
+            "structure_breaks": [{"break_type": "CHoCH", "direction": "bearish", "price": 2405.0,
+                                  "body_close": True, "index": 13}],
+            "fvgs": [{"direction": "bearish", "top": 2412.0, "bottom": 2410.0, "midpoint": 2411.0,
+                      "mitigated": False, "index": 15}],
+            "order_blocks": [],
         },
-        "h1": {}, "m15": {},
+        "m5": {},
     }
     decision = pl.plan_pending_order(
         symbol="XAUUSD",
@@ -169,7 +176,6 @@ try:
     )
 finally:
     real_requests.post = orig_post
-    pl.classify_symbol_fast = orig_classify
 
 check("learning context appears in LLM prompt",
       "PAST PERFORMANCE & LESSONS" in captured.get("prompt", "")

@@ -2792,7 +2792,7 @@ def scan_symbol(
                 # Planner config
                 _min_rr = float(planner_cfg.get("min_rr", 2.0))
                 _min_score = int(planner_cfg.get("min_score", 75))
-                _max_sl_pct = float(planner_cfg.get("max_sl_pct", 3.0))
+                _max_sl_pct = float(planner_cfg.get("max_sl_pct", 5.0))
                 _max_pending = int(planner_cfg.get("max_pending_per_symbol", 1))
                 _expiry_hours = int(planner_cfg.get("default_expiry_hours", 8))
                 _timeout = int(planner_cfg.get("timeout_seconds", 60))
@@ -2875,6 +2875,7 @@ def scan_symbol(
                     stream=_ollama_stream,
                     keep_alive=_ollama_keep_alive,
                     learning_context=_learning_ctx,
+                    confluence_cfg=planner_cfg.get("confluence", {}) if planner_cfg else {},
                 )
 
                 # 3. Execute via OrderLifecycleManager
