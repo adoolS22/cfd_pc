@@ -1015,16 +1015,14 @@ def guard_pending_orders(
         if news_reason:
             cancel_reason = f"High-impact news ahead: {news_reason}"
         elif sl > 0:
-            try:
-                tick = mt5_client.get_tick(order_symbol)
-            except Exception:
-                continue
-            bid = float(tick.get("bid") or 0)
-            ask = float(tick.get("ask") or 0)
-            if order_type == 2 and 0 < bid < sl:
-                cancel_reason = f"Structure broken: price {bid} fell below SL {sl} before fill"
-            elif order_type == 3 and ask > sl > 0:
-                cancel_reason = f"Structure broken: price {ask} rose above SL {sl} before fill"
+            # Use the order's own current market price (no symbol re-resolution:
+            # the MT5 order symbol like 'ETHUSDm' would get uppercased and fail).
+            price_now = float(order.get("price_current") or 0)
+            if price_now > 0:
+                if order_type == 2 and price_now < sl:
+                    cancel_reason = f"Structure broken: price {price_now} fell below SL {sl} before fill"
+                elif order_type == 3 and price_now > sl:
+                    cancel_reason = f"Structure broken: price {price_now} rose above SL {sl} before fill"
 
         if not cancel_reason:
             continue
