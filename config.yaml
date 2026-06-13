@@ -65,7 +65,10 @@ learning:
   use_regime_profile: true
 limit: 300
 llm_postmortem:
-  backfill_existing_on_startup: true
+  # Disabled: the startup backfill fired dozens of concurrent deepseek-r1 calls
+  # that starved the live veto calls (180s timeouts). Reviews still run live as
+  # real trades close; backfill of old outcomes is not needed for the experiment.
+  backfill_existing_on_startup: false
   enabled: true
   only_losses: false
   lookback_days: 1000
@@ -168,6 +171,9 @@ pending_order_planner:
   timeout_seconds: 180
   default_expiry_hours: 8
   stale_after_candles: 20
+  news_guard_enabled: true
+  news_guard_minutes_before: 45
+  news_guard_minutes_after: 30
   prefilter:
     enabled: true
     reject_equilibrium: true

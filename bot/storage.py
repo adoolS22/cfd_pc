@@ -707,6 +707,164 @@ class SignalStorage:
             )
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_unresolved_pending_orders(self) -> List[Dict[str, Any]]:
+        """Get planner orders whose real MT5 fate is not yet recorded (PENDING or FILLED)."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM pending_orders "
+                "WHERE status IN ('PENDING', 'FILLED') AND mt5_ticket > 0"
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def record_closed_real_trade(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry: float,
+        stop_loss: float,
+        take_profit_1: float,
+        take_profit_2: float,
+        score: int,
+        reasons: List[str],
+        outcome: str,
+        close_price: float,
+        pnl_pct: float,
+        closed_reason: str,
+        opened_at: str,
+        closed_at: str,
+    ) -> int:
+        """Record a real closed MT5 trade as signal + closed outcome.
+
+        Feeds the same tables the learning engine and LLM postmortem read,
+        so real planner trades enter the learning loop. Returns outcome_id.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO signals
+                (symbol, side, timestamp, score, entry, stop_loss,
+                 take_profit_near, take_profit_1, take_profit_2, reasons)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+            """, (
+                symbol, side, opened_at, int(score), float(entry), float(stop_loss),
+                float(take_profit_1), float(take_profit_2 or 0), json.dumps(reasons),
+            ))
+            signal_id = int(cursor.lastrowid)
+            cursor.execute("""
+                INSERT INTO signal_outcomes
+                (signal_id, symbol, side, entry, stop_loss,
+                 take_profit_near, take_profit_1, take_profit_2,
+                 outcome, close_price, pnl_pct, closed_at, closed_reason,
+                 tp1_touched, break_even_armed)
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+            """, (
+                signal_id, symbol, side, float(entry), float(stop_loss),
+                float(take_profit_1), float(take_profit_2 or 0),
+                outcome, float(close_price), float(pnl_pct), closed_at, closed_reason,
+            ))
+            outcome_id = int(cursor.lastrowid)
+            conn.commit()
+        logger.info(
+            f"Real trade recorded: {symbol} {side} {outcome} "
+            f"pnl={pnl_pct:+.2f}% (outcome_id={outcome_id})"
+        )
+        return outcome_id
+
+    def get_real_trade_stats(
+        self, symbol: str, lookback_days: int = 21, since_iso: Optional[str] = None
+    ) -> Dict[str, Dict[str, float]]:
+        """Win/loss stats per side from real MT5 trades for one symbol.
+
+        since_iso (optional) raises the time floor so trades closed before the
+        learning epoch (old architecture) are excluded.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
+        if since_iso and since_iso > cutoff:
+            cutoff = since_iso
+        stats: Dict[str, Dict[str, float]] = {}
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            rows = cursor.execute(
+                """
+                SELECT side,
+                       COUNT(*) AS trades,
+                       SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins,
+                       AVG(pnl_pct) AS avg_pnl
+                FROM signal_outcomes
+                WHERE symbol = ? AND closed_reason LIKE 'mt5_%'
+                  AND closed_at >= ? AND pnl_pct IS NOT NULL
+                GROUP BY side
+                """,
+                (symbol, cutoff),
+            ).fetchall()
+        for side, trades, wins, avg_pnl in rows:
+            trades = int(trades or 0)
+            if trades <= 0:
+                continue
+            stats[str(side)] = {
+                "trades": trades,
+                "wins": int(wins or 0),
+                "winrate": round((wins or 0) / trades, 2),
+                "avg_pnl_pct": round(float(avg_pnl or 0.0), 2),
+            }
+        return stats
+
+    def get_real_trade_performance(self, lookback_days: int = 7) -> List[Dict[str, Any]]:
+        """Aggregate real MT5 trade results per symbol+side for reporting."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT symbol, side,
+                       COUNT(*) AS trades,
+                       SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins,
+                       ROUND(AVG(pnl_pct), 3) AS avg_pnl_pct,
+                       ROUND(SUM(pnl_pct), 3) AS total_pnl_pct
+                FROM signal_outcomes
+                WHERE closed_reason LIKE 'mt5_%' AND closed_at >= ? AND pnl_pct IS NOT NULL
+                GROUP BY symbol, side
+                ORDER BY total_pnl_pct ASC
+                """,
+                (cutoff,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_recent_trade_lessons(
+        self, symbol: str, lookback_days: int = 30, limit: int = 4,
+        since_iso: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Recent LLM postmortem lessons for a symbol (most recent first).
+
+        Only lessons from REAL trades of the current architecture (closed_reason
+        LIKE 'mt5_%') are returned. Old shadow/backtest reviews are excluded so
+        the planner is not biased by failures of the previous (broken) system.
+        since_iso (optional) further excludes trades closed before the learning
+        epoch, using the outcome's close time (not the review time).
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
+        floor = since_iso if (since_iso and since_iso > cutoff) else cutoff
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT r.side, r.outcome, r.pnl_pct, r.verdict,
+                       r.mistake_tags, r.summary, r.recommendation
+                FROM llm_trade_reviews r
+                JOIN signal_outcomes o ON o.id = r.outcome_id
+                WHERE r.symbol = ? AND o.closed_reason LIKE 'mt5_%'
+                  AND COALESCE(o.closed_at, r.created_at) >= ?
+                ORDER BY r.created_at DESC
+                LIMIT ?
+                """,
+                (symbol, floor, int(limit)),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
 
     
     def has_open_position(self, symbol: str) -> Optional[str]:

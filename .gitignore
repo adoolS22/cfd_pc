@@ -142,6 +142,10 @@ logs/
 cache/
 temp/
 
+# Runtime state (machine-specific, not source)
+learning_epoch.txt
+equity_state.json
+
 # API Keys and sensitive data
 .env.local
 .env.production

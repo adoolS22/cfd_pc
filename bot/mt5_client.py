@@ -7,7 +7,7 @@ existing bot can consume MT5 quotes/candles with minimal code changes.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 import threading
 from typing import Any, Dict, List, Optional
@@ -501,6 +501,7 @@ class MT5Client:
 
     def _validate_broker_constraints(
         self, info: Dict[str, Any], order_type_str: str, price: float, sl: float, tp: float, lot: float,
+        mt5_symbol: str = "",
     ) -> Dict[str, Any]:
         """Validate all broker constraints before placing a pending order.
         Returns dict with 'valid': bool and 'errors': list[str], 'lot': adjusted lot."""
@@ -545,12 +546,27 @@ class MT5Client:
                     f"minimum={min_distance:.5f} (stops_level={stops_level})"
                 )
 
-        # Freeze level: minimum distance from current price to pending order price
-        if point > 0 and freeze_level > 0:
-            tick = mt5.symbol_info_tick(self._resolve_symbol(""))
-            if tick:
-                current = tick.bid if "SELL" in order_type_str.upper() else tick.ask
-                if current > 0 and abs(current - price) < freeze_level * point:
+        # Live tick checks: limit orders on the wrong side of the market are
+        # rejected by MT5 with retcode 10015 (Invalid price), so catch it here
+        # with a fresh tick instead of the (possibly stale) planner price.
+        tick = mt5.symbol_info_tick(mt5_symbol) if mt5_symbol else None
+        if tick is None:
+            errors.append(f"No live tick available for '{mt5_symbol}'")
+        else:
+            ot = order_type_str.upper()
+            current = tick.bid if "SELL" in ot else tick.ask
+            if current > 0:
+                if "BUY" in ot and price >= current:
+                    errors.append(
+                        f"BUY_LIMIT price ({price}) must be below current ask ({current})"
+                    )
+                elif "SELL" in ot and price <= current:
+                    errors.append(
+                        f"SELL_LIMIT price ({price}) must be above current bid ({current})"
+                    )
+
+                # Freeze level: minimum distance from current price to pending order price
+                if point > 0 and freeze_level > 0 and abs(current - price) < freeze_level * point:
                     errors.append(
                         f"Pending order price too close to market: "
                         f"distance={abs(current - price):.5f}, "
@@ -598,8 +614,8 @@ class MT5Client:
                 logger.error(f"Invalid pending order type: {order_type}")
                 return None
 
-            # Broker constraint validation
-            validation = self._validate_broker_constraints(info, ot, price, sl, tp, lot)
+            # Broker constraint validation (includes live-tick price side check)
+            validation = self._validate_broker_constraints(info, ot, price, sl, tp, lot, mt5_symbol)
             if not validation["valid"]:
                 for err in validation["errors"]:
                     logger.error(f"Broker constraint violation [{mt5_symbol}]: {err}")
@@ -681,6 +697,74 @@ class MT5Client:
 
             # Filter by bot magic number
             return [_namedtuple_to_dict(o) for o in orders if o.magic == 202604]
+
+    def get_closed_positions_history(self, lookback_days: int = 3) -> List[Dict[str, Any]]:
+        """Aggregate closed bot positions (magic 202604) from MT5 deal history.
+
+        Returns one dict per fully closed position:
+        position_id, open_order_ticket, symbol, side (LONG/SHORT), volume,
+        entry_price, close_price, profit (account currency, incl. swap+commission),
+        open_time, close_time (unix), close_reason ('TP' | 'SL' | 'OTHER').
+        """
+        with self._lock:
+            self._require_package()
+            self.connect_mt5()
+
+            date_from = datetime.now() - timedelta(days=max(1, lookback_days))
+            date_to = datetime.now() + timedelta(days=1)
+            deals = mt5.history_deals_get(date_from, date_to)
+            if deals is None:
+                return []
+
+            reason_sl = getattr(mt5, "DEAL_REASON_SL", 4)
+            reason_tp = getattr(mt5, "DEAL_REASON_TP", 5)
+            entry_in = getattr(mt5, "DEAL_ENTRY_IN", 0)
+            entry_outs = {getattr(mt5, "DEAL_ENTRY_OUT", 1), getattr(mt5, "DEAL_ENTRY_OUT_BY", 3)}
+
+            positions: Dict[int, Dict[str, Any]] = {}
+            for d in deals:
+                if d.magic != 202604 or not d.position_id:
+                    continue
+                pos = positions.setdefault(int(d.position_id), {
+                    "position_id": int(d.position_id),
+                    "open_order_ticket": 0,
+                    "symbol": d.symbol,
+                    "side": "",
+                    "volume": 0.0,
+                    "entry_price": 0.0,
+                    "close_price": 0.0,
+                    "profit": 0.0,
+                    "open_time": 0,
+                    "close_time": 0,
+                    "close_reason": "OTHER",
+                    "_in_volume": 0.0,
+                    "_out_volume": 0.0,
+                })
+                pos["profit"] += float(d.profit) + float(d.swap) + float(d.commission)
+                if d.entry == entry_in:
+                    pos["side"] = "LONG" if d.type == mt5.ORDER_TYPE_BUY else "SHORT"
+                    pos["entry_price"] = float(d.price)
+                    pos["open_time"] = int(d.time)
+                    pos["open_order_ticket"] = int(d.order)
+                    pos["_in_volume"] += float(d.volume)
+                elif d.entry in entry_outs:
+                    pos["close_price"] = float(d.price)
+                    pos["close_time"] = max(pos["close_time"], int(d.time))
+                    pos["_out_volume"] += float(d.volume)
+                    if d.reason == reason_sl:
+                        pos["close_reason"] = "SL"
+                    elif d.reason == reason_tp:
+                        pos["close_reason"] = "TP"
+
+            closed = []
+            for pos in positions.values():
+                # Fully closed: out volume covers in volume (with float tolerance)
+                if pos["_in_volume"] > 0 and pos["_out_volume"] >= pos["_in_volume"] - 1e-8:
+                    pos["volume"] = pos["_in_volume"]
+                    pos.pop("_in_volume", None)
+                    pos.pop("_out_volume", None)
+                    closed.append(pos)
+            return closed
 
     def modify_pending_order(
         self,

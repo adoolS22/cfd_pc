@@ -729,6 +729,389 @@ def close_positions_before_session_end(
                 pass
 
 
+_LEARNING_EPOCH_FILE = "learning_epoch.txt"
+_learning_epoch_cache: Optional[int] = None
+
+
+def _get_learning_epoch() -> int:
+    """Unix timestamp marking the start of the current architecture.
+
+    Trades opened before this are excluded from learning. Persisted to a file
+    so it survives restarts; created once on first run.
+    """
+    global _learning_epoch_cache
+    if _learning_epoch_cache is not None:
+        return _learning_epoch_cache
+    try:
+        with open(_LEARNING_EPOCH_FILE, "r") as f:
+            _learning_epoch_cache = int(float(f.read().strip()))
+            return _learning_epoch_cache
+    except (FileNotFoundError, ValueError):
+        pass
+    epoch = int(time.time())
+    try:
+        with open(_LEARNING_EPOCH_FILE, "w") as f:
+            f.write(str(epoch))
+    except Exception as e:
+        logger.debug(f"Could not persist learning epoch: {e}")
+    _learning_epoch_cache = epoch
+    logger.info(f"Learning epoch initialized: {datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()}")
+    return epoch
+
+
+def sync_mt5_real_outcomes(
+    storage: SignalStorage,
+    notifier: Any,
+    mt5_client: Any,
+    config: Config,
+) -> None:
+    """Sync real MT5 order fills and closed positions back into the learning DB.
+
+    Closes the learning loop for planner trades: marks DB orders FILLED when
+    they become positions, records closed positions as real outcomes
+    (closed_reason='mt5_*'), and enqueues LLM postmortem reviews for them.
+    Only trades opened after the learning epoch are learned from (see
+    _get_learning_epoch) so the previous architecture's results are excluded.
+    """
+    try:
+        unresolved = storage.get_unresolved_pending_orders()
+    except Exception as e:
+        logger.debug(f"Outcome sync: failed to load unresolved orders: {e}")
+        return
+    by_ticket: Dict[int, Dict[str, Any]] = {}
+    for row in unresolved:
+        try:
+            ticket = int(row.get("mt5_ticket") or 0)
+        except Exception:
+            ticket = 0
+        if ticket > 0:
+            by_ticket[ticket] = row
+    if not by_ticket:
+        return
+
+    # 1) Mark DB orders that became MT5 positions as FILLED
+    open_position_ids: set = set()
+    active_order_tickets: set = set()
+    try:
+        for p in mt5_client.get_all_bot_positions():
+            for key in ("identifier", "ticket"):
+                try:
+                    pid = int(p.get(key) or 0)
+                except Exception:
+                    pid = 0
+                if pid > 0:
+                    open_position_ids.add(pid)
+        for o in mt5_client.get_pending_orders():
+            try:
+                active_order_tickets.add(int(o.get("ticket") or 0))
+            except Exception:
+                pass
+        for ticket, row in by_ticket.items():
+            if row.get("status") == "PENDING" and ticket in open_position_ids:
+                storage.update_pending_order_status(ticket, "FILLED")
+                row["status"] = "FILLED"
+                logger.info(f"Outcome sync: order {ticket} ({row.get('symbol')}) FILLED on MT5")
+    except Exception as e:
+        logger.debug(f"Outcome sync: fill detection failed: {e}")
+
+    # 2) Record closed positions as real outcomes and feed the learning loop.
+    # Only record trades OPENED after the learning epoch, so trades from the old
+    # (pre-refactor) architecture don't poison the new system's learning context.
+    epoch = _get_learning_epoch()
+    try:
+        closed_positions = mt5_client.get_closed_positions_history(lookback_days=3)
+    except Exception as e:
+        logger.debug(f"Outcome sync: deal history fetch failed: {e}")
+        return
+
+    for pos in closed_positions:
+        ticket = int(pos.get("position_id") or 0)
+        row = by_ticket.get(ticket) or by_ticket.get(int(pos.get("open_order_ticket") or 0))
+        if not row:
+            continue
+        open_time = int(pos.get("open_time") or 0)
+        if open_time and open_time < epoch:
+            # Old-architecture trade: just resolve the DB row, don't learn from it
+            try:
+                storage.update_pending_order_status(int(row.get("mt5_ticket") or 0), "CLOSED")
+                row["status"] = "CLOSED"
+            except Exception:
+                pass
+            continue
+        row_ticket = int(row.get("mt5_ticket") or 0)
+
+        side = pos.get("side") or ("LONG" if "BUY" in str(row.get("order_type", "")).upper() else "SHORT")
+        entry = float(pos.get("entry_price") or row.get("entry_price") or 0)
+        close_price = float(pos.get("close_price") or 0)
+        if entry <= 0 or close_price <= 0:
+            continue
+        if side == "LONG":
+            pnl_pct = (close_price - entry) / entry * 100.0
+        else:
+            pnl_pct = (entry - close_price) / entry * 100.0
+
+        broker_reason = str(pos.get("close_reason") or "OTHER")
+        if broker_reason == "TP":
+            outcome, closed_reason = "TP1_HIT", "mt5_tp"
+        elif broker_reason == "SL":
+            outcome, closed_reason = "SL_HIT", "mt5_sl"
+        else:
+            outcome, closed_reason = "EXITED", "mt5_manual"
+
+        opened_at = datetime.fromtimestamp(int(pos.get("open_time") or 0), tz=timezone.utc).isoformat()
+        closed_at = datetime.fromtimestamp(int(pos.get("close_time") or 0), tz=timezone.utc).isoformat()
+        reasons = ["planner_real_trade", f"setup_quality={row.get('setup_quality', '')}"]
+        if row.get("reason"):
+            reasons.append(str(row.get("reason"))[:300])
+
+        try:
+            outcome_id = storage.record_closed_real_trade(
+                symbol=str(row.get("symbol") or pos.get("symbol") or ""),
+                side=side,
+                entry=entry,
+                stop_loss=float(row.get("stop_loss") or 0),
+                take_profit_1=float(row.get("take_profit_1") or 0),
+                take_profit_2=float(row.get("take_profit_2") or 0),
+                score=int(row.get("score") or 0),
+                reasons=reasons,
+                outcome=outcome,
+                close_price=close_price,
+                pnl_pct=round(pnl_pct, 4),
+                closed_reason=closed_reason,
+                opened_at=opened_at,
+                closed_at=closed_at,
+            )
+            storage.update_pending_order_status(row_ticket, "CLOSED")
+            row["status"] = "CLOSED"
+        except Exception as e:
+            logger.error(f"Outcome sync: failed to record closed trade (ticket {row_ticket}): {e}")
+            continue
+
+        _enqueue_llm_postmortem(storage, config, outcome_id, outcome, pnl_pct)
+
+        try:
+            if notifier and getattr(notifier, "enabled", False):
+                emoji = "✅" if pnl_pct > 0 else "🛑"
+                notifier.send_text(
+                    f"{emoji} <b>صفقة حقيقية أُغلقت: {row.get('symbol')}</b>\n"
+                    f"الاتجاه: {side} | النتيجة: {outcome}\n"
+                    f"الدخول: <code>{entry}</code> ← الإغلاق: <code>{close_price}</code>\n"
+                    f"النسبة: <b>{pnl_pct:+.2f}%</b> | الربح: {float(pos.get('profit') or 0.0):+.2f}\n"
+                    f"التذكرة: <code>{row_ticket}</code>"
+                )
+        except Exception:
+            pass
+
+    # 3) Expire DB orders that vanished from MT5 without ever becoming positions
+    now_utc = datetime.now(timezone.utc)
+    for ticket, row in by_ticket.items():
+        if row.get("status") != "PENDING":
+            continue
+        if ticket in open_position_ids or ticket in active_order_tickets:
+            continue
+        try:
+            created = datetime.fromisoformat(str(row.get("created_at")))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            max_age_hours = float(row.get("valid_until_hours") or 8) + 2.0
+            if (now_utc - created).total_seconds() > max_age_hours * 3600:
+                storage.update_pending_order_status(ticket, "EXPIRED")
+                logger.info(f"Outcome sync: order {ticket} ({row.get('symbol')}) expired without fill")
+        except Exception:
+            continue
+
+
+def _pending_news_blackout(config: Config, now: Optional[datetime] = None) -> Optional[str]:
+    """Return a reason string when inside a high-impact news blackout window.
+
+    Pending limit orders filled during CPI/NFP/FOMC spikes execute at the worst
+    moments with inflated spread — block new orders and cancel unfilled ones.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    planner_cfg = getattr(config, "pending_order_planner", {}) or {}
+    if not bool(planner_cfg.get("news_guard_enabled", True)):
+        return None
+    mins_before = float(planner_cfg.get("news_guard_minutes_before", 45))
+    mins_after = float(planner_cfg.get("news_guard_minutes_after", 30))
+
+    def _as_utc(dt: Optional[datetime]) -> Optional[datetime]:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    events = []
+    try:
+        from bot.calendar_events import get_next_cpi_release
+        release = get_next_cpi_release(now)
+        if release:
+            events.append(("CPI", _as_utc(release.release_datetime)))
+    except Exception:
+        pass
+    try:
+        from bot.calendar_events import analyze_nfp
+        nfp = analyze_nfp(high_vol_days=1, dt=now)
+        if nfp and nfp.next_release:
+            events.append(("NFP", _as_utc(nfp.next_release)))
+    except Exception:
+        pass
+
+    for name, event_dt in events:
+        if event_dt is None:
+            continue
+        delta_min = (event_dt - now).total_seconds() / 60.0
+        if -mins_after <= delta_min <= mins_before:
+            return f"{name} at {event_dt.strftime('%Y-%m-%d %H:%M UTC')} ({delta_min:+.0f} min)"
+
+    # FOMC decision day: block the statement window (announcement ~18:00-19:00 UTC)
+    try:
+        from bot.calendar_events import get_next_fomc_meeting
+        meeting = get_next_fomc_meeting(now)
+        end_date = _as_utc(getattr(meeting, "end_date", None)) if meeting else None
+        if end_date and end_date.date() == now.date() and 16 <= now.hour <= 21:
+            return "FOMC decision day statement window (16:00-21:00 UTC)"
+    except Exception:
+        pass
+
+    return None
+
+
+def guard_pending_orders(
+    storage: SignalStorage,
+    notifier: Any,
+    mt5_client: Any,
+    config: Config,
+) -> None:
+    """Cancel unfilled bot pending orders that are no longer safe to keep:
+
+    1. Structure broken: price already traded beyond the order's SL before the
+       fill — the POI the setup was built on is invalidated.
+    2. News blackout: a high-impact event (CPI/NFP/FOMC) is imminent.
+    """
+    try:
+        orders = mt5_client.get_pending_orders()
+    except Exception as e:
+        logger.debug(f"Pending guard: cannot fetch orders: {e}")
+        return
+    if not orders:
+        return
+
+    try:
+        news_reason = _pending_news_blackout(config)
+    except Exception:
+        news_reason = None
+
+    for order in orders:
+        ticket = int(order.get("ticket") or 0)
+        order_symbol = str(order.get("symbol") or "")
+        order_type = int(order.get("type", -1))  # 2=BUY_LIMIT, 3=SELL_LIMIT
+        sl = float(order.get("sl") or 0)
+        if ticket <= 0 or order_type not in (2, 3):
+            continue
+
+        cancel_reason = None
+        if news_reason:
+            cancel_reason = f"High-impact news ahead: {news_reason}"
+        elif sl > 0:
+            try:
+                tick = mt5_client.get_tick(order_symbol)
+            except Exception:
+                continue
+            bid = float(tick.get("bid") or 0)
+            ask = float(tick.get("ask") or 0)
+            if order_type == 2 and 0 < bid < sl:
+                cancel_reason = f"Structure broken: price {bid} fell below SL {sl} before fill"
+            elif order_type == 3 and ask > sl > 0:
+                cancel_reason = f"Structure broken: price {ask} rose above SL {sl} before fill"
+
+        if not cancel_reason:
+            continue
+
+        try:
+            if mt5_client.cancel_pending_order(ticket):
+                try:
+                    storage.update_pending_order_status(ticket, "CANCELLED")
+                except Exception:
+                    pass
+                logger.info(f"Pending guard: cancelled #{ticket} {order_symbol} — {cancel_reason}")
+                try:
+                    if notifier and getattr(notifier, "enabled", False):
+                        notifier.send_text(
+                            f"⚠️ <b>إلغاء أمر معلق: {order_symbol}</b>\n"
+                            f"السبب: {cancel_reason}\n"
+                            f"التذكرة: <code>{ticket}</code>"
+                        )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"Pending guard: cancel failed for ticket {ticket}: {e}")
+
+
+_last_real_perf_report_date: Optional[str] = None
+
+
+def send_real_trade_performance_report(storage: SignalStorage, notifier: Any) -> None:
+    """Daily Telegram report aggregating REAL MT5 trade results (7/21 days).
+
+    The evidence dashboard: which symbols/sides actually make money, so pruning
+    decisions are driven by data instead of opinions.
+    """
+    global _last_real_perf_report_date
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _last_real_perf_report_date == today:
+        return
+
+    try:
+        rows_7d = storage.get_real_trade_performance(lookback_days=7)
+        rows_21d = storage.get_real_trade_performance(lookback_days=21)
+    except Exception as e:
+        logger.debug(f"Real perf report: query failed: {e}")
+        return
+
+    _last_real_perf_report_date = today
+    if not rows_7d and not rows_21d:
+        return  # no real trades yet — stay silent
+
+    def _fmt_section(rows: List[Dict[str, Any]], title: str) -> str:
+        if not rows:
+            return f"\n<b>{title}</b>: لا صفقات"
+        lines = [f"\n<b>{title}</b>"]
+        total_pnl = 0.0
+        total_trades = 0
+        total_wins = 0
+        for r in rows:
+            trades = int(r.get("trades") or 0)
+            wins = int(r.get("wins") or 0)
+            total_trades += trades
+            total_wins += wins
+            pnl = float(r.get("total_pnl_pct") or 0)
+            total_pnl += pnl
+            wr = (wins / trades * 100) if trades else 0
+            mark = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
+            lines.append(
+                f"{mark} {r.get('symbol')} {r.get('side')}: "
+                f"{wins}/{trades} ({wr:.0f}%) | {pnl:+.2f}%"
+            )
+        overall_wr = (total_wins / total_trades * 100) if total_trades else 0
+        lines.append(f"<b>الإجمالي: {total_wins}/{total_trades} ({overall_wr:.0f}%) | {total_pnl:+.2f}%</b>")
+        return "\n".join(lines)
+
+    msg = (
+        "📊 <b>تقرير الصفقات الحقيقية (MT5)</b>"
+        + _fmt_section(rows_7d, "آخر 7 أيام")
+        + _fmt_section(rows_21d, "آخر 21 يوم")
+        + "\n\n💡 الرموز الحمراء باستمرار = مرشحة للحذف من القائمة"
+    )
+    try:
+        if notifier and getattr(notifier, "enabled", False):
+            notifier.send_text(msg)
+            logger.info("Real trade performance report sent")
+    except Exception as e:
+        logger.debug(f"Real perf report send failed: {e}")
+
+
 def _parse_utc_hhmm(value: str) -> Optional[int]:
     try:
         hh_str, mm_str = str(value).strip().split(":", 1)
@@ -2387,6 +2770,15 @@ def scan_symbol(
         _planner_enabled = planner_cfg.get("enabled", False) if planner_cfg else False
 
         if _planner_enabled:
+            # News blackout: don't plan new orders right before high-impact events
+            try:
+                _news_reason = _pending_news_blackout(config)
+            except Exception:
+                _news_reason = None
+            if _news_reason:
+                logger.info(f"{symbol}: planner skipped — news blackout ({_news_reason})")
+                return ''
+
             try:
                 from bot.mt5_client import MT5Client
                 from bot.mtf_data_collector import collect_mtf_analysis
@@ -2432,7 +2824,43 @@ def scan_symbol(
                     existing_positions=existing_positions,
                 )
 
-                # 2. Ask LLM for proactive pending-order decision
+                # 2. Build learning context from real trades + postmortem lessons.
+                # Exclude trades before the learning epoch (old architecture).
+                _learning_ctx_parts = []
+                try:
+                    _epoch_iso = datetime.fromtimestamp(
+                        _get_learning_epoch(), tz=timezone.utc
+                    ).isoformat()
+                    _real_stats = storage.get_real_trade_stats(
+                        symbol, lookback_days=21, since_iso=_epoch_iso
+                    )
+                    _side_lines = []
+                    for _side in ("LONG", "SHORT"):
+                        _st = _real_stats.get(_side)
+                        if _st:
+                            _losses = int(_st["trades"]) - int(_st["wins"])
+                            _side_lines.append(
+                                f"{_side}: {int(_st['wins'])}W/{_losses}L "
+                                f"winrate={_st['winrate']:.0%} avgPnL={_st['avg_pnl_pct']:+.2f}%"
+                            )
+                    if _side_lines:
+                        _learning_ctx_parts.append(
+                            "Real closed trades on this symbol (last 21 days): " + " | ".join(_side_lines)
+                        )
+                    for _ls in storage.get_recent_trade_lessons(
+                        symbol, lookback_days=30, limit=4, since_iso=_epoch_iso
+                    ):
+                        _learning_ctx_parts.append(
+                            f"Lesson ({_ls.get('side')}, pnl {float(_ls.get('pnl_pct') or 0):+.1f}%, "
+                            f"{_ls.get('verdict')}): {(_ls.get('summary') or '')[:120]} "
+                            f"-> {(_ls.get('recommendation') or '')[:100]} "
+                            f"[{_ls.get('mistake_tags') or ''}]"
+                        )
+                except Exception as _lc_err:
+                    logger.debug(f"Learning context build failed for {symbol}: {_lc_err}")
+                _learning_ctx = "\n".join(_learning_ctx_parts)
+
+                # 3. Ask LLM for proactive pending-order decision
                 decision = plan_pending_order(
                     symbol=symbol,
                     mtf_data=mtf_data,
@@ -2448,6 +2876,7 @@ def scan_symbol(
                     num_gpu=_ollama_gpu,
                     stream=_ollama_stream,
                     keep_alive=_ollama_keep_alive,
+                    learning_context=_learning_ctx,
                 )
 
                 # 3. Execute via OrderLifecycleManager
@@ -3257,6 +3686,27 @@ def run_scan_loop(config: Config) -> None:
                 close_positions_before_session_end(storage, notifier, _mt5_client, config)
         except Exception as _sce:
             logger.warning(f"Session close check failed: {_sce}")
+
+        # ── Sync real MT5 fills/closes into the learning DB ──────────────
+        try:
+            _sync_client = getattr(binance_exchange, "client", None) or getattr(binance_exchange, "mt5", None)
+            if _sync_client is not None:
+                sync_mt5_real_outcomes(storage, notifier, _sync_client, config)
+        except Exception as _sync_err:
+            logger.warning(f"MT5 outcome sync failed: {_sync_err}")
+
+        # ── Guard pending orders: structure breaks + news blackout ───────
+        try:
+            if _sync_client is not None:
+                guard_pending_orders(storage, notifier, _sync_client, config)
+        except Exception as _guard_err:
+            logger.warning(f"Pending order guard failed: {_guard_err}")
+
+        # ── Daily real-trade performance report (evidence dashboard) ─────
+        try:
+            send_real_trade_performance_report(storage, notifier)
+        except Exception as _perf_err:
+            logger.debug(f"Real perf report failed: {_perf_err}")
 
         # ── Phase 5: Check all open outcomes against current prices ──────
         check_open_outcomes(storage, notifier, binance_exchange, kucoin_exchange, config, equity_protection=equity_protection)

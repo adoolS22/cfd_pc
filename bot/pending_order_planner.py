@@ -318,8 +318,197 @@ def score_candidate_fast(mtf_data: Dict[str, Any]) -> int:
     fresh_pois = [p for p in pois if p.get("valid") is True and p.get("mitigated") is False]
     if fresh_pois:
         score += 15
-        
+
     return score
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Code-first pricing: the code owns the numbers, the LLM only vetoes
+# ═══════════════════════════════════════════════════════════════════════
+
+SMC_VETO_PROMPT = """You are a strict SMC (Smart Money Concepts) trade reviewer.
+The trading system has ALREADY computed a pending-order proposal deterministically
+from multi-timeframe analysis (POI zones, liquidity targets, ATR-buffered stop).
+Your ONLY job is to APPROVE or REJECT this exact proposal.
+You must NOT propose different prices, levels, or order types.
+
+Evaluate:
+1. Does the HTF bias genuinely support the trade direction?
+2. Is the POI high quality (created by displacement, aligned with structure)?
+3. Is the draw on liquidity logical for the take-profit target?
+4. Premium/Discount location. IMPORTANT SMC RULE:
+   - A SELL (bearish) entry SHOULD be in PREMIUM (above equilibrium) — selling
+     high is correct. Premium + bearish is GOOD, not a conflict.
+   - A BUY (bullish) entry SHOULD be in DISCOUNT (below equilibrium) — buying
+     low is correct. Discount + bullish is GOOD, not a conflict.
+   Only flag a location problem if the entry is on the WRONG side (e.g. a SELL
+   placed in deep discount, or a BUY placed in deep premium).
+5. Are there conflicting signals across timeframes that make this setup unreliable?
+6. If a PAST PERFORMANCE & LESSONS section is present: weigh it, and be more
+   cautious when this setup closely resembles recent losing trades.
+
+Respond with your VERDICT as JSON, exactly this schema:
+{
+  "decision": "APPROVE" or "REJECT",
+  "score": 0-100,
+  "setup_quality": "HIGH" or "MEDIUM" or "WEAK",
+  "reason": "one short sentence"
+}
+"""
+
+# Ollama structured-output schema: forces the model to emit exactly these keys.
+VETO_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "decision": {"type": "string", "enum": ["APPROVE", "REJECT"]},
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "setup_quality": {"type": "string", "enum": ["HIGH", "MEDIUM", "WEAK"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["decision", "score", "setup_quality", "reason"],
+}
+
+
+# Appended at the very END of the prompt so it is the last thing the model
+# reads before generating. Without this, format:json makes deepseek-r1 echo the
+# proposal JSON it was given instead of producing the verdict.
+SMC_VETO_REQUEST = """
+
+[YOUR TASK]
+Do NOT repeat or echo the proposed order above. Output ONLY your own verdict
+about whether to take that trade, as a JSON object with EXACTLY these four keys:
+{"decision": "APPROVE" or "REJECT", "score": 0-100, "setup_quality": "HIGH" or "MEDIUM" or "WEAK", "reason": "one short sentence"}
+"""
+
+
+def build_candidate_order(
+    mtf_data: Dict[str, Any],
+    min_rr: float = 1.5,
+    atr_buffer_mult: float = 0.25,
+    min_stop_atr_mult: float = 0.5,
+    max_rr: float = 10.0,
+) -> Optional[Dict[str, Any]]:
+    """Deterministically price a pending-order candidate from the SMC analysis.
+
+    Entry = near edge of the freshest unmitigated POI in the bias direction.
+    SL = far edge of the POI plus an ATR buffer, but never tighter than
+         min_stop_atr_mult * ATR (so a microscopic POI can't create a stop that
+         gets wicked out instantly with an absurd R:R).
+    TP1 = nearest HTF liquidity level giving at least min_rr.
+    Returns None when no valid candidate exists (code-side rejection).
+    """
+    ctx = extract_htf_context(mtf_data)
+    current_price = float(mtf_data.get("current_price", 0) or 0)
+    if current_price <= 0:
+        return None
+
+    bias = str(ctx.get("bias", {}).get("final_bias", "neutral"))
+    if bias not in ("bullish", "bearish"):
+        return None
+
+    # ATR for the SL buffer: prefer execution TF, fall back to higher TFs
+    atr = 0.0
+    for tf in ("m15", "h1", "h4"):
+        try:
+            v = float(mtf_data.get(tf, {}).get("atr") or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v > 0:
+            atr = v
+            break
+    if atr <= 0:
+        atr = current_price * 0.001
+
+    pois = [
+        p for p in ctx.get("poi_candidates", [])
+        if p.get("valid") and not p.get("mitigated")
+        and float(p.get("top") or 0) > float(p.get("bottom") or 0) > 0
+    ]
+    liquidity = ctx.get("liquidity", {})
+
+    if bias == "bullish":
+        # Pullback entry: nearest bullish POI fully below current price
+        candidates = [
+            p for p in pois
+            if str(p.get("direction", "")).startswith("bull")
+            and float(p["top"]) < current_price
+        ]
+        if not candidates:
+            return None
+        poi = max(candidates, key=lambda p: float(p["top"]))
+        entry = float(poi["top"])
+        stop_loss = float(poi["bottom"]) - atr * atr_buffer_mult
+        # Floor the stop distance so a tiny POI can't produce a wick-out stop
+        min_stop_dist = atr * min_stop_atr_mult
+        if entry - stop_loss < min_stop_dist:
+            stop_loss = entry - min_stop_dist
+        risk = entry - stop_loss
+        if risk <= 0:
+            return None
+        targets = sorted(
+            float(x) for x in liquidity.get("nearest_bsl", [])
+            if float(x or 0) > entry
+        )
+        order_type = "BUY_LIMIT"
+    else:
+        candidates = [
+            p for p in pois
+            if str(p.get("direction", "")).startswith("bear")
+            and float(p["bottom"]) > current_price
+        ]
+        if not candidates:
+            return None
+        poi = min(candidates, key=lambda p: float(p["bottom"]))
+        entry = float(poi["bottom"])
+        stop_loss = float(poi["top"]) + atr * atr_buffer_mult
+        # Floor the stop distance so a tiny POI can't produce a wick-out stop
+        min_stop_dist = atr * min_stop_atr_mult
+        if stop_loss - entry < min_stop_dist:
+            stop_loss = entry + min_stop_dist
+        risk = stop_loss - entry
+        if risk <= 0:
+            return None
+        targets = sorted(
+            (float(x) for x in liquidity.get("nearest_ssl", [])
+             if 0 < float(x or 0) < entry),
+            reverse=True,
+        )
+        order_type = "SELL_LIMIT"
+
+    # TP1 = nearest liquidity target with min_rr <= RR <= max_rr.
+    # An RR above max_rr means the target is unrealistically far relative to the
+    # stop; cap TP1 at max_rr * risk so the target stays plausible.
+    tp1 = None
+    tp2 = None
+    for i, target in enumerate(targets):
+        rr = abs(target - entry) / risk
+        if rr >= min_rr:
+            if rr > max_rr:
+                tp1 = entry + risk * max_rr if order_type == "BUY_LIMIT" else entry - risk * max_rr
+            else:
+                tp1 = target
+            if i + 1 < len(targets):
+                tp2 = targets[i + 1]
+            break
+    if tp1 is None:
+        return None
+    if tp2 is None:
+        tp2 = entry + risk * 3.0 if order_type == "BUY_LIMIT" else entry - risk * 3.0
+
+    return {
+        "order_type": order_type,
+        "entry_price": round(entry, 5),
+        "stop_loss": round(stop_loss, 5),
+        "take_profit_1": round(float(tp1), 5),
+        "take_profit_2": round(float(tp2), 5),
+        "risk_to_reward": round(abs(tp1 - entry) / risk, 2),
+        "bias": bias,
+        "poi_type": str(poi.get("type", "")),
+        "poi_timeframe": str(poi.get("timeframe", "")),
+        "poi_zone_low": round(float(poi["bottom"]), 5),
+        "poi_zone_high": round(float(poi["top"]), 5),
+        "atr_used": round(atr, 5),
+    }
 
 
 def extract_htf_context(mtf_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -883,6 +1072,7 @@ def plan_pending_order(
     num_gpu: int = 999,
     stream: bool = False,
     keep_alive: str = "30m",
+    learning_context: str = "",
 ) -> PendingOrderDecision:
     """
     Evaluates MTF SMC data and decides if a pending order should be placed.
@@ -920,32 +1110,76 @@ def plan_pending_order(
             reason=f"Prefilter Watchlist: {reason}"
         )
         
-    logger.info(f"[PREFILTER_PASS] {symbol} Passed prefilter, sending to LLM. reason={reason}")
+    logger.info(f"[PREFILTER_PASS] {symbol} Passed prefilter. reason={reason}")
 
-    # Strip raw candles for the LLM prompt
-    mtf_summary = summarize_mtf_data(mtf_data)
-
-    # Build user prompt with the pre-computed structured data
-    user_content = (
-        f"Symbol: {symbol}\n"
-        f"Current Price: {current_price}\n"
-        f"Spread: {spread}\n\n"
-        f"Pre-computed Multi-Timeframe SMC Analysis Summary (JSON):\n"
-        f"{json.dumps(mtf_summary, ensure_ascii=False, indent=2, default=str)}"
+    # Code-first pricing: the code computes the order, the LLM only approves/rejects
+    proposal = build_candidate_order(mtf_data, min_rr=min_rr)
+    if proposal is None:
+        logger.info(f"[CODE_PRICER] {symbol}: no valid code-priced candidate, skipping LLM")
+        return PendingOrderDecision(
+            decision="NO_TRADE",
+            symbol=symbol,
+            setup_quality="INVALID",
+            reason="No code-priced candidate (no fresh POI in bias direction with adequate R:R)",
+        )
+    logger.info(
+        f"[CODE_PRICER] {symbol}: {proposal['order_type']} entry={proposal['entry_price']} "
+        f"SL={proposal['stop_loss']} TP1={proposal['take_profit_1']} RR={proposal['risk_to_reward']} "
+        f"(POI {proposal['poi_type']}/{proposal['poi_timeframe']}) — sending to LLM for veto"
     )
+
+    # Compact context for the veto (NOT the full market dump). With code-first
+    # pricing the model only needs bias/structure/location to judge — sending the
+    # whole multi-TF JSON made R1 inference exceed the 180s timeout.
+    _ctx = extract_htf_context(mtf_data)
+    _bias = _ctx.get("bias", {})
+    _struct = _ctx.get("market_structure", {})
+    veto_context = (
+        f"Symbol: {symbol} | Current Price: {current_price} | Spread: {spread}\n"
+        f"Bias: final={_bias.get('final_bias')} daily={_bias.get('daily')} h4={_bias.get('h4')}\n"
+        f"Location: {_ctx.get('premium_discount', {}).get('current_location')}\n"
+        f"Structure: displacement={_struct.get('displacement')} bos={_struct.get('bos')} "
+        f"choch={_struct.get('choch')} mss={_struct.get('mss')}\n"
+        f"Draw on liquidity: {_ctx.get('liquidity', {}).get('draw_on_liquidity')}"
+    )
+
+    user_content = veto_context
 
     # Call Ollama via native API
     try:
         import requests
 
         url = f"{ollama_base_url}/api/generate"
-        price_reminder = f"\n\nCRITICAL MATH RULES:\n1. The current price is {current_price}.\n2. For BUY_LIMIT: Stop Loss must be LOWER than Entry. Take Profit must be HIGHER than Entry.\n3. For SELL_LIMIT: Stop Loss must be HIGHER than Entry. Take Profit must be LOWER than Entry.\n\n"
-        combined_prompt = f"{SMC_PENDING_ORDER_PROMPT}\n\n[MARKET DATA]\n{user_content}{price_reminder}{SMC_JSON_SCHEMA_PROMPT}"
+        learning_block = ""
+        if learning_context:
+            learning_block = (
+                f"\n\n[PAST PERFORMANCE & LESSONS]\n"
+                f"{learning_context[:1200]}\n"
+                f"Weigh this context in your judgment. It is informational, not a "
+                f"command to reject — judge this setup on its own technical merits.\n"
+            )
+        # Render the proposal as plain text (NOT JSON) so the model cannot simply
+        # echo a JSON object back; with format:json that echo was losing setups.
+        proposal_block = (
+            f"\n\n[PROPOSED ORDER — review only, do NOT echo these numbers]\n"
+            f"Direction: {proposal['order_type']}\n"
+            f"Entry: {proposal['entry_price']} | Stop: {proposal['stop_loss']} | "
+            f"Target: {proposal['take_profit_1']} | R:R: {proposal['risk_to_reward']}\n"
+            f"Setup: {proposal['poi_type']} on {proposal['poi_timeframe']} timeframe, "
+            f"bias is {proposal['bias']}\n"
+        )
+        combined_prompt = f"{SMC_VETO_PROMPT}\n\n[MARKET DATA]\n{user_content}{proposal_block}{learning_block}{SMC_VETO_REQUEST}"
         
         payload = {
             "model": ollama_model,
             "prompt": combined_prompt,
             "stream": stream,
+            # Constrain output to the EXACT verdict schema via Ollama structured
+            # outputs. Plain "json" let deepseek-r1 echo a JSON blob from the
+            # prompt (market data / proposal); a full schema makes the grammar
+            # only permit these four keys, so echoing is impossible and every
+            # response carries a real APPROVE/REJECT decision.
+            "format": VETO_RESPONSE_SCHEMA,
             "options": {
                 "temperature": temperature,
                 "num_ctx": num_ctx,
@@ -983,12 +1217,53 @@ def plan_pending_order(
             guardrail_violations=["non_json_response"],
         )
 
-    # Normalize non-standard LLM response formats
-    parsed = _normalize_llm_response(parsed)
+    # Detect echo: model returned the proposal JSON instead of a verdict
+    if "decision" not in parsed:
+        logger.warning(
+            f"[LLM_VETO] {symbol}: response has no 'decision' key "
+            f"(model likely echoed the proposal); treating as REJECT. keys={list(parsed.keys())}"
+        )
 
-    # Apply guardrails
+    # Veto verdict: APPROVE places the code-priced order, anything else is NO_TRADE
+    verdict = str(parsed.get("decision", "REJECT")).strip().upper()
+    try:
+        veto_score = int(float(parsed.get("score", 0) or 0))
+    except (TypeError, ValueError):
+        veto_score = 0
+    veto_quality = str(parsed.get("setup_quality", "WEAK")).strip().upper()
+    veto_reason = str(parsed.get("reason", "")).strip()[:300]
+
+    if verdict != "APPROVE":
+        logger.info(f"[LLM_VETO] {symbol}: REJECT (score={veto_score}) — {veto_reason}")
+        return PendingOrderDecision(
+            decision="NO_TRADE",
+            symbol=symbol,
+            setup_quality=veto_quality or "WEAK",
+            score=veto_score,
+            reason=f"LLM veto: {veto_reason or 'rejected'}",
+            full_analysis={"proposal": proposal, "veto": parsed},
+        )
+
+    # Approved: run guardrails on the CODE-priced numbers (never LLM numbers)
+    guard_input = {
+        "decision": "PLACE_BUY_LIMIT" if proposal["order_type"] == "BUY_LIMIT" else "PLACE_SELL_LIMIT",
+        "score": veto_score,
+        "setup_quality": veto_quality or "MEDIUM",
+        "planned_order": {
+            "order_type": proposal["order_type"],
+            "entry_price": proposal["entry_price"],
+            "stop_loss": proposal["stop_loss"],
+            "take_profit_1": proposal["take_profit_1"],
+            "take_profit_2": proposal["take_profit_2"],
+            "valid_until_hours": 8,
+            "order_reason": veto_reason
+                or f"{proposal['poi_type']} {proposal['poi_timeframe']} retest ({proposal['bias']})",
+        },
+        "proposal": proposal,
+        "veto": parsed,
+    }
     result = _apply_guardrails(
-        parsed=parsed,
+        parsed=guard_input,
         current_price=current_price,
         min_rr=min_rr,
         min_score=min_score,
